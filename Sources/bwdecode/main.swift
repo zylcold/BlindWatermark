@@ -3,9 +3,10 @@ import Foundation
 import ImageIO
 import BlindWatermarkCore
 
-// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y]
+// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma]
 //   --bits    payload 有效位数，默认 32，需与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
+//   --plane   水印压在哪一平面，默认 chroma，需与打水印端一致
 
 func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -16,6 +17,7 @@ var path: String?
 var payloadBits = 32
 var offsetX = 0
 var offsetY = 0
+var plane: WatermarkPlane = .chroma
 
 var index = 1
 let arguments = CommandLine.arguments
@@ -36,6 +38,12 @@ while index < arguments.count {
         }
         offsetX = x
         offsetY = y
+    case "--plane":
+        index += 1
+        guard index < arguments.count, let value = WatermarkPlane(rawValue: arguments[index]) else {
+            fail("--plane 需要 luma 或 chroma", code: 2)
+        }
+        plane = value
     default:
         if path == nil, !argument.hasPrefix("--") {
             path = argument
@@ -47,7 +55,7 @@ while index < arguments.count {
 }
 
 guard let path else {
-    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y]", code: 2)
+    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma]", code: 2)
 }
 
 let url = URL(fileURLWithPath: path)
@@ -63,7 +71,8 @@ guard let result = BlockCodec.decode(
     image,
     payloadBits: payloadBits,
     offsetX: offsetX,
-    offsetY: offsetY
+    offsetY: offsetY,
+    plane: plane
 ) else {
     fail("解码失败: 图像太小", code: 1)
 }
@@ -82,11 +91,12 @@ if weak == 0 {
 }
 
 print(String(
-    format: "payload=0x%08X  高16位=0x%04X  低16位=0x%04X  payloadBits=%d  相位=(%d,%d)  signal=%.2f  |z|中位=%.1f  最弱=%.1f  弱bit=%d/%d  %@",
+    format: "payload=0x%08X  高16位=0x%04X  低16位=0x%04X  payloadBits=%d  平面=%@  相位=(%d,%d)  signal=%.2f  |z|中位=%.1f  最弱=%.1f  弱bit=%d/%d  %@",
     result.payload,
     (result.payload >> 16) & 0xFFFF,
     result.payload & 0xFFFF,
     result.payloadBits,
+    result.plane.rawValue,
     result.offsetX,
     result.offsetY,
     result.signal,

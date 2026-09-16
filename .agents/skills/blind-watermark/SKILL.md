@@ -35,7 +35,7 @@ swift run -c release --package-path "$BW_REPO" bwdecode <截图路径>
 输出：
 
 ```
-payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=3.00  |z|中位=74.5  最弱=74.5  弱bit=0/32  OK(全部 32 bit 显著)
+payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=453.1  最弱=58.2  弱bit=0/32  OK(全部 32 bit 显著)
 ```
 
 | 字段 | 含义 |
@@ -43,8 +43,9 @@ payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,
 | `payload` | 32 bit 原始载荷 |
 | `高16位` | 默认布局下是设备标识哈希 |
 | `低16位` | 默认布局下是时间桶序号 |
-| `signal` | 平均亮度差，应接近打水印端设定的 delta（默认 6） |
-| `\|z\|中位` | 各 bit 显著度中位数，带水印画面实测约 6+，无水印约 0.5 |
+| `平面` | 水印压在哪个平面，默认 `chroma`。必须与打水印端一致 |
+| `signal` | 平均特征差，chroma 模式默认参数下约 9，luma 模式约等于 delta |
+| `\|z\|中位` | 各 bit 显著度中位数。chroma 模式实测 300+，luma 模式 5~35，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 个数，**判读就看它** |
 | 末尾判定 | `OK` 弱 bit=0，结论可信；`WEAK` ≤4 个弱 bit，要交叉验证；`NO` 大概率没水印 |
 
@@ -75,8 +76,10 @@ print(datetime.datetime.utcfromtimestamp(b * 600), '~', datetime.datetime.utcfro
    - **必须用原始全屏截图**。缩放、二次转发、微信压缩都会改块边长与平铺周期，直接解不出来。
    - 截图被裁过（比如裁掉状态栏）→ 手动给相位：`--offset 0,-<裁掉的高度>`。
    - 图片是转发来的缩略图 → 让用户重发原图。
+   - 试一下另一个平面：`--plane luma`（默认是 `chroma`）。
 2. `WEAK` → 结果可能对，但不要单凭它下结论；结合日志/用户描述交叉验证。
-3. `OK` 也要核对 `signal` 是否接近 6：如果 `signal` 明显偏离，说明图案没对上。
+3. `OK` 也要核对 `signal` 与平面是否自洽：chroma 默认参数下应约 9，luma 下应约等于 delta。
+   明显偏离说明图案没对上，或 `--plane` 给错了（给错平面通常会直接判 NO）。
 4. 解出来但 payload 看着不像预期布局 → 看目标 App 的 `payloadProvider` 与 `payloadBits` 设置，
    必要时用 `--bits N` 对齐位数。
 

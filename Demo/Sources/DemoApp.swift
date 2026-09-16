@@ -12,10 +12,11 @@ struct DemoApp: App {
     init() {
         let env = ProcessInfo.processInfo.environment
         let payload = env["BW_PAYLOAD"].flatMap { UInt32($0, radix: 16) } ?? 0xDEAD_BEEF
+        let plane = env["BW_PLANE"].flatMap(WatermarkPlane.init(rawValue:)) ?? .chroma
         if let delta = env["BW_DELTA"].flatMap({ UInt8($0) }) {
-            Watermark.install(payload: payload, delta: delta)
+            Watermark.install(payload: payload, delta: delta, plane: plane)
         } else {
-            Watermark.install(payload: payload)
+            Watermark.install(payload: payload, plane: plane)
         }
     }
 

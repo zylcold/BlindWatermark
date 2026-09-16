@@ -3,6 +3,9 @@ import UIKit
 import BlindWatermarkCore
 import BlindWatermarkAutoLoad
 
+/// SPM 下 `BlindWatermarkCore` 是另一个模块，接入方只 `import BlindWatermark` 时也得能拿到这个枚举。
+public typealias WatermarkPlane = BlindWatermarkCore.WatermarkPlane
+
 /// 屏上盲水印入口。
 ///
 /// 常驻覆盖 App 全部界面，截图必然带水印，事后用 `bwdecode` 从截图还原 payload 溯源。
@@ -11,11 +14,17 @@ public enum Watermark {
     /// 手动接入：立刻设置 payload，并挂载到当前所有 scene（后续新 scene 自动挂载）。
     ///
     ///     Watermark.install(payload: serverIssuedPayload)
-    public static func install(payload: UInt32, payloadBits: Int = 32, delta: UInt8 = 6) {
+    public static func install(
+        payload: UInt32,
+        payloadBits: Int = 32,
+        delta: UInt8 = 8,
+        plane: WatermarkPlane = .chroma
+    ) {
         WatermarkState.shared.configure(
             payload: payload,
             payloadBits: payloadBits,
-            delta: delta
+            delta: delta,
+            plane: plane
         )
         WatermarkState.shared.start()
     }
@@ -37,6 +46,7 @@ final class WatermarkState {
         var payload: UInt32
         var payloadBits: Int
         var delta: UInt8
+        var plane: WatermarkPlane
     }
 
     var payloadProvider: (() -> UInt32)?
@@ -48,8 +58,8 @@ final class WatermarkState {
 
     private init() {}
 
-    func configure(payload: UInt32, payloadBits: Int, delta: UInt8) {
-        config = Config(payload: payload, payloadBits: payloadBits, delta: delta)
+    func configure(payload: UInt32, payloadBits: Int, delta: UInt8, plane: WatermarkPlane) {
+        config = Config(payload: payload, payloadBits: payloadBits, delta: delta, plane: plane)
     }
 
     /// 幂等。首次调用注册通知，之后只刷新图案。
@@ -120,7 +130,7 @@ final class WatermarkState {
     private func effectiveConfig() -> Config {
         if let config { return config }
         let payload = payloadProvider?() ?? WatermarkDefaultPayload.current()
-        return Config(payload: payload, payloadBits: 32, delta: 6)
+        return Config(payload: payload, payloadBits: 32, delta: 8, plane: .chroma)
     }
 
     private func makePattern(scale: CGFloat) -> UIImage? {
@@ -128,7 +138,8 @@ final class WatermarkState {
         let tile = BlockCodec.makeTile(
             payload: config.payload,
             payloadBits: config.payloadBits,
-            alpha: config.delta
+            alpha: config.delta,
+            plane: config.plane
         )
         guard let cgImage = tile.makeCGImage() else { return nil }
         // scale 与屏幕一致，tile 才是 256 **设备像素**，块大小恒定 16 设备像素

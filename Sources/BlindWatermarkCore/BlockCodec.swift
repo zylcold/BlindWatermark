@@ -31,6 +31,19 @@ import Foundation
 ///
 /// ## 限制
 /// 截图必须是**原始设备像素**分辨率。缩放会改变块边长与平铺周期，解码失效。
+/// 水印压在哪个平面上。
+public enum WatermarkPlane: String, CaseIterable {
+    /// 亮度平面：全通道等量加亮/压暗。解码信噪比最好，但会在平坦区域留下可见的棋盘网格。
+    case luma
+    /// 蓝-黄对色平面：一对块**等亮度**、只差色度。
+    ///
+    /// 混色是 RGB 上的线性运算，两个等亮度的叠加色混出来的结果也等亮度，
+    /// 所以亮度平面**一个像素都没动** —— 没有亮度网格可看。
+    /// 人眼对高频色度的分辨力只有亮度的大约四分之一，且灰阶内容在色度通道上恒为 0，
+    /// 内容噪声几乎消失。代价是彩色内容（照片）会引入色度噪声。
+    case chroma
+}
+
 public enum BlockCodec {
     /// 块边长（设备像素）。8：模拟器实测 16 块在真实 UI 上 |z| 中位只有 1.9，
     /// 块减半让观测数 x4 且相邻块内容更相关，z 提升约 3 倍。
@@ -47,6 +60,7 @@ public enum BlockCodec {
     public struct Decoded: Equatable {
         public let payload: UInt32
         public let payloadBits: Int
+        public let plane: WatermarkPlane
         /// 块网格相位，0..<blockSize
         public let offsetX: Int
         public let offsetY: Int
@@ -66,11 +80,20 @@ public enum BlockCodec {
     /// - Parameters:
     ///   - payload: 待嵌入的比特，低位在前
     ///   - payloadBits: 有效位数 1...32。同一 payload 在 tile 内重复 `pairsPerTile / payloadBits` 次
-    ///   - alpha: 扰动幅度，即解码端观察到的 |d|。**下限 2**，更低会被色域转换与量化吃掉。
-    ///     默认 6 是模拟器实测值：真实界面上块差分的内容噪声 σ≈30，alpha=3 时每 bit 的
-    ///     \|z\| 中位只有 3.3、过半 bit 证据不足；6 时 \|z\| 中位 6.4、全部 bit 显著。
-    ///     代价是平坦区域会有 6/255 ≈ 2.4% 的 8px 棋盘纹理，凑近能看出来。
-    public static func makeTile(payload: UInt32, payloadBits: Int = 32, alpha: UInt8 = 6) -> RGBAImage {
+    ///   - alpha: 扰动幅度。解码端看到的 |d|：luma 模式下 ≈ alpha，chroma 模式下 ≈ 1.13×alpha。
+    ///     **下限 2**，更低会被色域转换与量化吃掉。
+    ///
+    ///     默认 8 是模拟器实测调出来的：
+    ///     - luma 模式：alpha=3 时真实界面上 \|z\| 中位只有 3.3、半数 bit 证据不足，必須 6 以上；
+    ///       代价是平坦区 6/255 的 8px 亮度棋盘，肉眼可见。
+    ///     - chroma 模式：灰阶内容在色度平面几乎零噪声，alpha=8 时 \|z\| 中位 350+，
+    ///       且 8 与 1 这组预乘值让**亮度残差只有 0.026/255**，比 6 与 1 那组（0.2/255）还小。
+    public static func makeTile(
+        payload: UInt32,
+        payloadBits: Int = 32,
+        alpha: UInt8 = 8,
+        plane: WatermarkPlane = .chroma
+    ) -> RGBAImage {
         precondition((1...32).contains(payloadBits), "payloadBits 必须在 1...32")
         var tile = RGBAImage(width: tileSize, height: tileSize)
         for p in 0..<pairsPerTile {
@@ -81,24 +104,58 @@ public enum BlockCodec {
             if isFlipped(p, payloadBits: payloadBits) { leftDark.toggle() }
             let x = col * 2 * blockSize
             let y = row * blockSize
-            paint(&tile, x: x, y: y, dark: leftDark, alpha: alpha)
-            paint(&tile, x: x + blockSize, y: y, dark: !leftDark, alpha: alpha)
+            paint(&tile, x: x, y: y, dark: leftDark, alpha: alpha, plane: plane)
+            paint(&tile, x: x + blockSize, y: y, dark: !leftDark, alpha: alpha, plane: plane)
         }
         return tile
     }
 
     /// 同一个 bit 的重复观测隔一份翻转极性，让梯度偏置成对相消。
     /// 重复份数为奇数时不翻，宁可不抵消也不能翻错。
+    /// 陪色分量。`p = round(0.114 * a / 0.886)`，至少 1 且不超过 a。
+    /// 下限 1 是为了不让 a 小时的取整把陪色打成纯黑（那就退化成亮度模式了）。
+    static func chromaCompanion(_ alpha: UInt8) -> UInt8 {
+        let ideal = (0.114 * Double(alpha) / 0.886).rounded()
+        return UInt8(max(1, min(Double(alpha), ideal)))
+    }
+
     static func isFlipped(_ localPairIndex: Int, payloadBits: Int) -> Bool {
         let repetitions = pairsPerTile / payloadBits
         guard repetitions >= 2, repetitions % 2 == 0 else { return false }
         return (localPairIndex / payloadBits) % 2 == 1
     }
 
-    private static func paint(_ image: inout RGBAImage, x: Int, y: Int, dark: Bool, alpha: UInt8) {
-        // 预乘 alpha：纯黑 (0,0,0,a)，纯白 (a,a,a,a)
-        let v = dark ? UInt8(0) : alpha
-        image.fillRect(x: x, y: y, width: blockSize, height: blockSize, rgba: (v, v, v, alpha))
+    private static func paint(
+        _ image: inout RGBAImage,
+        x: Int,
+        y: Int,
+        dark: Bool,
+        alpha: UInt8,
+        plane: WatermarkPlane
+    ) {
+        switch plane {
+        case .luma:
+            // 预乘 alpha：纯黑 (0,0,0,a)，纯白 (a,a,a,a)
+            let v = dark ? UInt8(0) : alpha
+            image.fillRect(x: x, y: y, width: blockSize, height: blockSize, rgba: (v, v, v, alpha))
+        case .chroma:
+            // 两个叠加色必须**等亮度**，否则亮度平面会被动到，网格就看得见了。
+            //
+            // 亮度零方向的向量是 (0.128, 0.128, -1)：0.299*0.128 + 0.587*0.128 - 0.114 = 0。
+            // 于是取 (0, 0, a) 与 (p, p, 0)，令 0.114a = 0.886p，即 p = 0.1287a。
+            //
+            // 关键：混色是预乘 alpha 的线性运算，合成分的亮度差**等于叠加色在预乘空间的亮度差**，
+            // 不随 alpha 衰减。所以 p 必须精确到这个关系，否则亮度网格立刻显形：
+            // a=6 时 p 取整成 0，等于拿纯黑去配纯蓝，亮度差 0.68/255 —— 肉眼可见。
+            let p = chromaCompanion(alpha)
+            // 注意极性：解码特征 B - (R+G)/2 在 (0,0,a) 上是 +a、在 (p,p,0) 上是 -p。
+            // 「dark」的语义是**特征值更低**，所以暗块配陪色，亮块配蓝。配反了 bit 全翻。
+            if dark {
+                image.fillRect(x: x, y: y, width: blockSize, height: blockSize, rgba: (p, p, 0, alpha))
+            } else {
+                image.fillRect(x: x, y: y, width: blockSize, height: blockSize, rgba: (0, 0, alpha, alpha))
+            }
+        }
     }
 
     // MARK: - 解码
@@ -115,14 +172,15 @@ public enum BlockCodec {
         _ image: RGBAImage,
         payloadBits: Int = 32,
         offsetX: Int = 0,
-        offsetY: Int = 0
+        offsetY: Int = 0,
+        plane: WatermarkPlane = .chroma
     ) -> Decoded? {
         precondition((1...32).contains(payloadBits), "payloadBits 必须在 1...32")
         guard image.width >= blockSize * 2, image.height >= blockSize else { return nil }
 
-        let luma = image.lumaBuffer()
+        let feature = image.featureBuffer(plane)
         let stride = image.width + 1
-        let integral = integralImage(luma, width: image.width, height: image.height)
+        let integral = integralImage(feature, width: image.width, height: image.height)
         let observation = accumulate(
             integral, stride, image,
             ox: offsetX, oy: offsetY, payloadBits: payloadBits,
@@ -136,6 +194,7 @@ public enum BlockCodec {
         return Decoded(
             payload: payload,
             payloadBits: payloadBits,
+            plane: plane,
             offsetX: offsetX,
             offsetY: offsetY,
             signal: observation.signal,

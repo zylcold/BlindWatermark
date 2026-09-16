@@ -13,14 +13,44 @@ final class BlockCodecTests: XCTestCase {
         payload: UInt32,
         payloadBits: Int = 32,
         delta: UInt8 = 3,
+        plane: WatermarkPlane = .chroma,
         offset: (Int, Int) = (0, 0),
         drawBase: (inout RGBAImage) -> Void
     ) -> RGBAImage {
         var base = RGBAImage(width: width, height: height)
         drawBase(&base)
-        let tile = BlockCodec.makeTile(payload: payload, payloadBits: payloadBits, alpha: delta)
+        let tile = BlockCodec.makeTile(payload: payload, payloadBits: payloadBits, alpha: delta, plane: plane)
         base.blendTiled(tile, dx: offset.0, dy: offset.1)
         return base
+    }
+
+    /// 亮度平面的块均值极差，用来量化「有没有可见的亮度网格」
+    private func lumaSpread(_ image: RGBAImage) -> Double {
+        spread(image.featureBuffer(.luma))
+    }
+
+    private func chromaSpread(_ image: RGBAImage) -> Double {
+        spread(image.featureBuffer(.chroma))
+    }
+
+    private func spread(_ feature: [Double]) -> Double {
+        var means: [Double] = []
+        let width = 512
+        var y = 0
+        while y + 8 <= 512 {
+            var x = 0
+            while x + 8 <= 512 {
+                var sum = 0.0
+                for row in 0..<8 {
+                    for col in 0..<8 { sum += feature[(y + row) * width + x + col] }
+                }
+                means.append(sum / 64)
+                x += 8
+            }
+            y += 8
+        }
+        guard let low = means.min(), let high = means.max() else { return 0 }
+        return high - low
     }
 
     private func jpegRoundTrip(_ image: RGBAImage, quality: CGFloat) throws -> RGBAImage {
@@ -146,6 +176,87 @@ final class BlockCodecTests: XCTestCase {
         plain.fill((255, 255, 255, 255))
         let decoded = try XCTUnwrap(BlockCodec.decode(plain))
         XCTAssertLessThan(decoded.confidence, 2, "无水印画面不应给出高置信度")
+    }
+
+    // MARK: - 平面选择
+
+    /// chroma 的卖点就是「亮度一个像素都没动」，也就是肉眼看不到亮度网格。
+    /// 这里直接把不变量测出来：色度平面铺满了，亮度平面的块均值极差仍然是 0。
+    func testChromaPreservesLumaOnFlatBackground() throws {
+        let payload: UInt32 = 0xC0FF_EE01
+        var base = RGBAImage(width: 512, height: 512)
+        base.fill((250, 250, 250, 255))
+        base.blendTiled(BlockCodec.makeTile(payload: payload, alpha: 8, plane: .chroma))
+
+        XCTAssertLessThan(lumaSpread(base), 0.3, "chroma 模式几乎不改动亮度（预乘取整的残差）")
+        XCTAssertGreaterThan(chromaSpread(base), 5, "色度平面应该确实被写入了")
+    }
+
+    func testLumaPlaneDoesChangeLuma() throws {
+        var base = RGBAImage(width: 512, height: 512)
+        base.fill((250, 250, 250, 255))
+        base.blendTiled(BlockCodec.makeTile(payload: 0x1234_5678, alpha: 6, plane: .luma))
+
+        XCTAssertGreaterThan(lumaSpread(base), 4, "luma 模式必然会留下亮度网格")
+    }
+
+    func testLumaPlaneStillDecodes() throws {
+        let payload: UInt32 = 0x0BAD_F00D
+        let image = makeScreenshot(payload: payload, plane: .luma) { $0.fill((255, 255, 255, 255)) }
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, plane: .luma))
+        XCTAssertEqual(decoded.payload, payload)
+        XCTAssertGreaterThan(decoded.confidence, 30)
+    }
+
+    /// 彩色内容（照片）在色度平面上的噪声最大，这是 chroma 模式的坏情况。
+    /// `chromaScale` 是色度结构的最小尺度：32px 接近真实照片，8px 是刻意与水印同频的对抗样本。
+    private func colorfulScreenshot(payload: UInt32, chromaScale: Int) -> RGBAImage {
+        makeScreenshot(payload: payload) { base in
+            let width = base.width
+            let gridW = width / chromaScale + 2
+            let gridH = base.height / chromaScale + 2
+            var noise = [Double](repeating: 0, count: gridW * gridH * 3)
+            var seed: UInt64 = 0x2545_F491_4F6C_DD1D
+            for i in 0..<noise.count {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                noise[i] = Double(seed >> 33) / Double(UInt64.max >> 33)
+            }
+            for y in 0..<base.height {
+                for x in 0..<width {
+                    let gx = Double(x) / Double(chromaScale)
+                    let gy = Double(y) / Double(chromaScale)
+                    let x0 = Int(gx), y0 = Int(gy)
+                    let fx = gx - Double(x0), fy = gy - Double(y0)
+                    func sample(_ c: Int, _ xx: Int, _ yy: Int) -> Double {
+                        noise[(min(yy, gridH - 1) * gridW + min(xx, gridW - 1)) * 3 + c]
+                    }
+                    let i = (y * width + x) * 4
+                    for c in 0..<3 {
+                        let top = sample(c, x0, y0) * (1 - fx) + sample(c, x0 + 1, y0) * fx
+                        let bottom = sample(c, x0, y0 + 1) * (1 - fx) + sample(c, x0 + 1, y0 + 1) * fx
+                        base.pixels[i + c] = UInt8(clamping: Int((top * (1 - fy) + bottom * fy) * 255))
+                    }
+                    base.pixels[i + 3] = 255
+                }
+            }
+        }
+    }
+
+    func testChromaOnRealisticColorContent() throws {
+        let payload: UInt32 = 0xCAFE_BABE
+        let image = colorfulScreenshot(payload: payload, chromaScale: 32)
+        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        XCTAssertEqual(decoded.payload, payload)
+    }
+
+    /// 对抗样本：色度结构恰好是 8px —— 和水印同一个空间频率。
+    /// chroma 模式在这里必然退化，但**绝不能静默解错**：要么解不出原 payload，要么置信度低到会被判成 NO。
+    func testChromaNeverSilentlyWrongOnAdversarialColorTexture() throws {
+        let payload: UInt32 = 0xCAFE_BABE
+        let image = colorfulScreenshot(payload: payload, chromaScale: 8)
+        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let silentlyWrong = decoded.payload != payload && decoded.confidence >= 3
+        XCTAssertFalse(silentlyWrong, "解错了却给出高置信度（信心=\(decoded.confidence)）")
     }
 
     // MARK: - 端到端产物

@@ -106,12 +106,21 @@ public struct RGBAImage {
         }
     }
 
-    /// 亮度缓冲，0...255 量纲。解码端只关心亮度。
-    func lumaBuffer() -> [Double] {
+    /// 解码用的特征平面。逐像素标量，量纲与像素值一致。
+    func featureBuffer(_ plane: WatermarkPlane) -> [Double] {
         var out = [Double](repeating: 0, count: width * height)
         for i in 0..<(width * height) {
             let p = i * 4
-            out[i] = Double(pixels[p]) * 0.299 + Double(pixels[p + 1]) * 0.587 + Double(pixels[p + 2]) * 0.114
+            let r = Double(pixels[p])
+            let g = Double(pixels[p + 1])
+            let b = Double(pixels[p + 2])
+            switch plane {
+            case .luma:
+                out[i] = r * 0.299 + g * 0.587 + b * 0.114
+            case .chroma:
+                // 蓝-黄对色通道。灰阶内容在这里恒为 0，所以文字/白底界面的内容噪声几乎消失。
+                out[i] = b - (r + g) / 2
+            }
         }
         return out
     }
