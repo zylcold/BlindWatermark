@@ -57,12 +57,16 @@ luma 模式的代价就是那 6/255 的亮度网格，凑近看得见 —— 这
 
 ```swift
 import BlindWatermark
+import BlindWatermarkCore
 
-// 方式一：一行接入。设置 payload 并挂载，后续新 scene 自动跟上
-Watermark.install(payload: serverIssuedPayload)
+// 服务端算好 mac 下发完整 16 字节，客户端只管渲染
+Watermark.install(payload: serverIssuedBytes)
 
-// 方式二：零代码。只提供 payload 来源，窗口挂载由 ObjC +load 接管
-Watermark.payloadProvider = { serverIssuedPayload }
+// 换页时更新页面索引
+Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts, pageIndex: 3, key: key).bytes)
+
+// 32 bit 便捷入口仍在
+Watermark.install(payload: 0xDEAD_BEEF)
 ```
 
 未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + 时间桶），开箱可跑。
@@ -89,8 +93,8 @@ pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `payload` | — | 32 bit 载荷，低位在前 |
-| `payloadBits` | 32 | 有效位数 1...32，解码端必须一致 |
+| `payload` | — | 载荷字节，bit 0 在 payload[0] 最低位 |
+| `payloadBits` | `payload.count × 8` | 有效位数，上限 256，解码端必须一致 |
 | `plane` | `chroma` | `chroma` 压色度平面（不可见），`luma` 压亮度平面（简单但看得见） |
 | `delta`（代码里叫 `alpha`） | 8 | 扰动幅度。解码端看到的 \|d\|：luma 模式 ≈ delta，chroma 模式 ≈ 1.13×delta。**下限 2** |
 | `offsetX/offsetY` | 0 | 解码时的图案相位，截图被裁过才需要 |
@@ -99,11 +103,12 @@ pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
 
 ```bash
 swift build -c release
-.build/release/bwdecode shot.png [--bits 32] [--offset X,Y]
+.build/release/bwdecode shot.png --layout --key 00112233445566778899aabbccddeeff
 ```
 
 ```
-payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=12.9  |z|中位=6.4  最弱=3.4  弱bit=0/32  OK(全部 32 bit 显著)
+payload=0xefbeadde123baa6a02000100a56d00a5  payloadBits=128  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=227.8  最弱=16.5  弱bit=0/128  OK(全部 128 bit 显著)
+uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0001)  mac=OK
 ```
 
 判读看**弱 bit 数**（`|z| < 3` 的 bit 个数），不看最弱那一个 —— 真实界面上个别 bit 的 z

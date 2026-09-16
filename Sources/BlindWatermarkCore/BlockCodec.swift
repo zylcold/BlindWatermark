@@ -1,36 +1,6 @@
 import CoreGraphics
 import Foundation
 
-/// 屏上盲水印编解码。
-///
-/// ## 编码
-/// 覆盖全屏的是 8×8 **像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
-/// 每两个相邻块 (A,B) 编码 1 bit：
-/// - `1` → A 压暗、B 提亮
-/// - `0` → A 提亮、B 压暗
-///
-/// ## 为什么是差分
-/// 解码只取 `d = mean(A) - mean(B)` 的符号。压暗块的减益是 `−base·α`，提亮块的增益是
-/// `(255−base)·α`，两者相加把 `base` 项抵消掉：`d ≈ ∓255α = ∓delta`。
-/// **与底色无关** —— 白底、黑底、深色照片都能解。
-///
-/// ## 为什么翻转极性
-/// 相邻块的均值差里还混着**内容本身的亮度梯度**（渐变背景、照片），梯度大时能压过 delta。
-/// 于是同一个 bit 的多份重复观测里，隔一份把黑白极性反过来（解码端同步翻符号）：
-/// 水印分量同向累加，梯度分量正负相消。
-///
-/// 注意不能把翻转做成棋盘：bit 索引固定了列，同一 bit 的所有观测行奇偶性一致，棋盘翻不动它。
-///
-/// ## 为什么软累加而不是符号投票
-/// 相邻块的差异里，内容本身（文字边缘、照片细节）经常远大于 delta。只取符号等于把水印丢掉。
-/// 于是按**带符号的差值累加**，再除以标准误得到每个 bit 的 z 值：
-/// 水印分量随观测次数线性累加，内容噪声按 1/√n 衰减。手机截图有几十个 tile 重复，
-/// 每个 bit 上百次观测，足以把信噪比拉回来。
-///
-/// 相位选择与「画面里到底有没有水印」都看 z 值，不看平均幅度 —— 平均幅度被内容噪声主导。
-///
-/// ## 限制
-/// 截图必须是**原始设备像素**分辨率。缩放会改变块边长与平铺周期，解码失效。
 /// 水印压在哪个平面上。
 public enum WatermarkPlane: String, CaseIterable {
     /// 亮度平面：全通道等量加亮/压暗。解码信噪比最好，但会在平坦区域留下可见的棋盘网格。
@@ -44,6 +14,32 @@ public enum WatermarkPlane: String, CaseIterable {
     case chroma
 }
 
+/// 屏上盲水印编解码。
+///
+/// ## 编码
+/// 覆盖全屏的是 8×8 **像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
+/// 每两个相邻块 (A,B) 编码 1 bit：`1` → A 特征值低、B 高；`0` → 反过来。
+///
+/// ## 为什么是差分
+/// 解码取 `d = mean(A) - mean(B)`。亮度模式下压暗减益是 `−base·α`、提亮增益是 `(255−base)·α`，
+/// 相加后 `base` 项抵消：`d ≈ ∓alpha`，**与底色无关**。
+///
+/// ## 为什么翻转极性
+/// 相邻块差值里混着**内容本身的梯度**（渐变、照片），大时能压过 delta。
+/// 同一个 bit 的重复观测里隔一份把极性反过来（解码端同步翻符号）：水印同向累加，梯度成对相消。
+/// 注意不能做成棋盘：bit 索引固定了列，同一 bit 的观测行奇偶性一致，棋盘翻不动它。
+///
+/// ## 为什么软累加而不是符号投票
+/// 内容差异经常远大于 delta，只取符号等于把水印丢掉。按带符号差值累加再除以标准误得到 z 值：
+/// 水印随观测次数线性累加，内容噪声按 `1/√n` 衰减。手机截图几十个 tile 重复，每 bit 上百次观测。
+///
+/// ## 容量
+/// 每 tile 有 `pairsPerTile`(=512) 个 pair。payloadBits 上限 **256**（此时每 tile 只重复 2 份，
+/// 刚好还够翻转极性用）。chroma 模式下 128 bit 在 iPhone 16 上每 bit 约 182 次观测，\|z\| 中位 200+，
+/// 余量仍然非常充裕。
+///
+/// ## 限制
+/// 截图必须是**原始设备像素**分辨率。缩放会改变块边长与平铺周期，解码失效。
 public enum BlockCodec {
     /// 块边长（设备像素）。8：模拟器实测 16 块在真实 UI 上 |z| 中位只有 1.9，
     /// 块减半让观测数 x4 且相邻块内容更相关，z 提升约 3 倍。
@@ -56,9 +52,12 @@ public enum BlockCodec {
     static let blockRowsPerTile = tileSize / blockSize
     /// 每个 tile 的 pair 总数
     public static let pairsPerTile = pairsPerRow * blockRowsPerTile
+    /// 载荷上限（bit）。再大每 tile 重复次数会低于 2，翻转极性就没戏了
+    public static let maxPayloadBits = 256
 
     public struct Decoded: Equatable {
-        public let payload: UInt32
+        /// 解出的载荷，小端按 bit 打包，长度 = ceil(payloadBits / 8)
+        public let payloadBytes: [UInt8]
         public let payloadBits: Int
         public let plane: WatermarkPlane
         /// 块网格相位，0..<blockSize
@@ -72,36 +71,51 @@ public enum BlockCodec {
         public let weakBits: Int
         /// 各 bit |z| 的中位数
         public let medianAbsZ: Double
+
+        /// 低 32 bit 视图。payloadBits ≤ 32 时就是完整值；更长时只取前 4 字节，别拿来当完整载荷用
+        public var payload: UInt32 {
+            var value: UInt32 = 0
+            for (i, byte) in payloadBytes.prefix(4).enumerated() {
+                value |= UInt32(byte) << (8 * UInt32(i))
+            }
+            return value
+        }
     }
 
     // MARK: - 编码
 
     /// 生成平铺用的水印 tile。未着色像素完全透明，不产生任何扰动。
     /// - Parameters:
-    ///   - payload: 待嵌入的比特，低位在前
-    ///   - payloadBits: 有效位数 1...32。同一 payload 在 tile 内重复 `pairsPerTile / payloadBits` 次
+    ///   - payload: 待嵌入的字节，bit 0 在 payload[0] 的最低位
+    ///   - payloadBits: 有效位数，默认取 `payload.count * 8`。同一 payload 在 tile 内重复
+    ///     `pairsPerTile / payloadBits` 份
     ///   - alpha: 扰动幅度。解码端看到的 |d|：luma 模式下 ≈ alpha，chroma 模式下 ≈ 1.13×alpha。
     ///     **下限 2**，更低会被色域转换与量化吃掉。
     ///
     ///     默认 8 是模拟器实测调出来的：
     ///     - luma 模式：alpha=3 时真实界面上 \|z\| 中位只有 3.3、半数 bit 证据不足，必須 6 以上；
     ///       代价是平坦区 6/255 的 8px 亮度棋盘，肉眼可见。
-    ///     - chroma 模式：灰阶内容在色度平面几乎零噪声，alpha=8 时 \|z\| 中位 350+，
-    ///       且 8 与 1 这组预乘值让**亮度残差只有 0.026/255**，比 6 与 1 那组（0.2/255）还小。
+    ///     - chroma 模式：灰阶内容在色度平面几乎零噪声，alpha=8 时 128 bit 载荷 \|z\| 中位 200+，
+    ///       且 8 与 1 这组预乘值让**亮度残差只有 0.026/255**。
     public static func makeTile(
-        payload: UInt32,
-        payloadBits: Int = 32,
+        payload: [UInt8],
+        payloadBits: Int? = nil,
         alpha: UInt8 = 8,
         plane: WatermarkPlane = .chroma
     ) -> RGBAImage {
-        precondition((1...32).contains(payloadBits), "payloadBits 必须在 1...32")
+        let bits = payloadBits ?? payload.count * 8
+        precondition(!payload.isEmpty, "payload 不能为空")
+        precondition((1...maxPayloadBits).contains(bits), "payloadBits 必须在 1...\(maxPayloadBits)")
+        precondition(bits <= payload.count * 8, "payloadBits 超过了 payload 自带的位数")
+
         var tile = RGBAImage(width: tileSize, height: tileSize)
         for p in 0..<pairsPerTile {
             let row = p / pairsPerRow
             let col = p % pairsPerRow
-            let bit = Int((payload >> UInt32(p % payloadBits)) & 1)
+            let index = p % bits
+            let bit = Int((payload[index >> 3] >> UInt8(index & 7)) & 1)
             var leftDark = (bit == 1)
-            if isFlipped(p, payloadBits: payloadBits) { leftDark.toggle() }
+            if isFlipped(p, payloadBits: bits) { leftDark.toggle() }
             let x = col * 2 * blockSize
             let y = row * blockSize
             paint(&tile, x: x, y: y, dark: leftDark, alpha: alpha, plane: plane)
@@ -110,19 +124,31 @@ public enum BlockCodec {
         return tile
     }
 
+    /// 32 bit 便捷入口。等价于把 UInt32 小端展开后走字节版。
+    public static func makeTile(
+        payload: UInt32,
+        payloadBits: Int = 32,
+        alpha: UInt8 = 8,
+        plane: WatermarkPlane = .chroma
+    ) -> RGBAImage {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        for i in 0..<4 { bytes[i] = UInt8((payload >> (8 * UInt32(i))) & 0xFF) }
+        return makeTile(payload: bytes, payloadBits: payloadBits, alpha: alpha, plane: plane)
+    }
+
     /// 同一个 bit 的重复观测隔一份翻转极性，让梯度偏置成对相消。
     /// 重复份数为奇数时不翻，宁可不抵消也不能翻错。
+    static func isFlipped(_ localPairIndex: Int, payloadBits: Int) -> Bool {
+        let repetitions = pairsPerTile / payloadBits
+        guard repetitions >= 2, repetitions % 2 == 0 else { return false }
+        return (localPairIndex / payloadBits) % 2 == 1
+    }
+
     /// 陪色分量。`p = round(0.114 * a / 0.886)`，至少 1 且不超过 a。
     /// 下限 1 是为了不让 a 小时的取整把陪色打成纯黑（那就退化成亮度模式了）。
     static func chromaCompanion(_ alpha: UInt8) -> UInt8 {
         let ideal = (0.114 * Double(alpha) / 0.886).rounded()
         return UInt8(max(1, min(Double(alpha), ideal)))
-    }
-
-    static func isFlipped(_ localPairIndex: Int, payloadBits: Int) -> Bool {
-        let repetitions = pairsPerTile / payloadBits
-        guard repetitions >= 2, repetitions % 2 == 0 else { return false }
-        return (localPairIndex / payloadBits) % 2 == 1
     }
 
     private static func paint(
@@ -168,14 +194,16 @@ public enum BlockCodec {
     /// 不做相位自动搜索。图案按块网格坐标派生 bit 索引，存在天然的位置简并 ——
     /// 错位相位在纯色/低变化画面上也能让所有 bit 自洽，只是解出一份被打乱的结果。
     /// 与其猜，不如把偏移交给调用方。
+    ///
+    /// **payloadBits 必须与编码端一致**，给错会得到一份自洽但错误的载荷，置信度还很高。
     public static func decode(
         _ image: RGBAImage,
-        payloadBits: Int = 32,
+        payloadBits: Int = WatermarkPayload.payloadBits,
         offsetX: Int = 0,
         offsetY: Int = 0,
         plane: WatermarkPlane = .chroma
     ) -> Decoded? {
-        precondition((1...32).contains(payloadBits), "payloadBits 必须在 1...32")
+        precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
         guard image.width >= blockSize * 2, image.height >= blockSize else { return nil }
 
         let feature = image.featureBuffer(plane)
@@ -187,12 +215,12 @@ public enum BlockCodec {
             rowStride: 1, colStride: 1
         )
         let scores = observation.scores()
-        var payload: UInt32 = 0
+        var payloadBytes = [UInt8](repeating: 0, count: (payloadBits + 7) / 8)
         for i in 0..<payloadBits where scores[i] < 0 {
-            payload |= (1 << UInt32(i))
+            payloadBytes[i >> 3] |= 1 << UInt8(i & 7)
         }
         return Decoded(
-            payload: payload,
+            payloadBytes: payloadBytes,
             payloadBits: payloadBits,
             plane: plane,
             offsetX: offsetX,
@@ -305,7 +333,7 @@ public enum BlockCodec {
     // MARK: - 积分图
 
     /// 尺寸 (width+1) × (height+1)，首行首列为 0。块均值 O(1) 取值。
-    private static func integralImage(_ luma: [Double], width: Int, height: Int) -> [Double] {
+    private static func integralImage(_ feature: [Double], width: Int, height: Int) -> [Double] {
         let stride = width + 1
         var sat = [Double](repeating: 0, count: stride * (height + 1))
         for y in 0..<height {
@@ -314,7 +342,7 @@ public enum BlockCodec {
             let dstRow = (y + 1) * stride
             let prevRow = y * stride
             for x in 0..<width {
-                rowSum += luma[srcRow + x]
+                rowSum += feature[srcRow + x]
                 sat[dstRow + x + 1] = sat[prevRow + x + 1] + rowSum
             }
         }

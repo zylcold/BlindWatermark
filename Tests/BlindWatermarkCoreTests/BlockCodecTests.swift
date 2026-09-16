@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import XCTest
@@ -73,7 +74,7 @@ final class BlockCodecTests: XCTestCase {
     func testWhiteBackground() throws {
         let payload: UInt32 = 0xA5C3_1F07
         let image = makeScreenshot(payload: payload) { $0.fill((255, 255, 255, 255)) }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
         XCTAssertGreaterThan(decoded.signal, 2.0)
         XCTAssertGreaterThan(decoded.confidence, 30)
@@ -82,7 +83,7 @@ final class BlockCodecTests: XCTestCase {
     func testBlackBackground() throws {
         let payload: UInt32 = 0x1234_ABCD
         let image = makeScreenshot(payload: payload) { $0.fill((0, 0, 0, 255)) }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
         XCTAssertGreaterThan(decoded.signal, 2.0)
         XCTAssertGreaterThan(decoded.confidence, 30)
@@ -91,7 +92,7 @@ final class BlockCodecTests: XCTestCase {
     func testMidGrayBackground() throws {
         let payload: UInt32 = 0x0F0F_0F0F
         let image = makeScreenshot(payload: payload) { $0.fill((128, 128, 128, 255)) }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
     }
 
@@ -115,7 +116,7 @@ final class BlockCodecTests: XCTestCase {
                 }
             }
         }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
         XCTAssertGreaterThan(decoded.confidence, 2, "内容噪声下 z 值仍应明显为正")
     }
@@ -126,7 +127,7 @@ final class BlockCodecTests: XCTestCase {
         let payload: UInt32 = 0x5A5A_0001
         let image = makeScreenshot(payload: payload) { $0.fill((240, 240, 240, 255)) }
         let compressed = try jpegRoundTrip(image, quality: 0.8)
-        let decoded = try XCTUnwrap(BlockCodec.decode(compressed))
+        let decoded = try XCTUnwrap(BlockCodec.decode(compressed, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
         XCTAssertGreaterThan(decoded.confidence, 30)
     }
@@ -135,7 +136,7 @@ final class BlockCodecTests: XCTestCase {
         let payload: UInt32 = 0x5A5A_0002
         let image = makeScreenshot(payload: payload) { $0.fill((200, 200, 200, 255)) }
         let compressed = try jpegRoundTrip(image, quality: 0.6)
-        let decoded = try XCTUnwrap(BlockCodec.decode(compressed))
+        let decoded = try XCTUnwrap(BlockCodec.decode(compressed, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
     }
 
@@ -151,7 +152,7 @@ final class BlockCodecTests: XCTestCase {
                 for c in 0..<4 { cropped.pixels[di + c] = image.pixels[si + c] }
             }
         }
-        let decoded = try XCTUnwrap(BlockCodec.decode(cropped))
+        let decoded = try XCTUnwrap(BlockCodec.decode(cropped, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
     }
 
@@ -166,7 +167,7 @@ final class BlockCodecTests: XCTestCase {
     func testMinimumDeltaIsTwo() throws {
         let payload: UInt32 = 0x00FF_00FF
         let image = makeScreenshot(payload: payload, delta: 2) { $0.fill((255, 255, 255, 255)) }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
     }
 
@@ -174,7 +175,7 @@ final class BlockCodecTests: XCTestCase {
         // 不贴 tile，纯底图
         var plain = RGBAImage(width: 640, height: 900)
         plain.fill((255, 255, 255, 255))
-        let decoded = try XCTUnwrap(BlockCodec.decode(plain))
+        let decoded = try XCTUnwrap(BlockCodec.decode(plain, payloadBits: 32))
         XCTAssertLessThan(decoded.confidence, 2, "无水印画面不应给出高置信度")
     }
 
@@ -213,7 +214,7 @@ final class BlockCodecTests: XCTestCase {
     func testLumaPlaneStillDecodes() throws {
         let payload: UInt32 = 0x0BAD_F00D
         let image = makeScreenshot(payload: payload, plane: .luma) { $0.fill((255, 255, 255, 255)) }
-        let decoded = try XCTUnwrap(BlockCodec.decode(image, plane: .luma))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32, plane: .luma))
         XCTAssertEqual(decoded.payload, payload)
         XCTAssertGreaterThan(decoded.confidence, 30)
     }
@@ -255,7 +256,7 @@ final class BlockCodecTests: XCTestCase {
     func testChromaOnRealisticColorContent() throws {
         let payload: UInt32 = 0xCAFE_BABE
         let image = colorfulScreenshot(payload: payload, chromaScale: 32)
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         XCTAssertEqual(decoded.payload, payload)
     }
 
@@ -264,7 +265,7 @@ final class BlockCodecTests: XCTestCase {
     func testChromaNeverSilentlyWrongOnAdversarialColorTexture() throws {
         let payload: UInt32 = 0xCAFE_BABE
         let image = colorfulScreenshot(payload: payload, chromaScale: 8)
-        let decoded = try XCTUnwrap(BlockCodec.decode(image))
+        let decoded = try XCTUnwrap(BlockCodec.decode(image, payloadBits: 32))
         let silentlyWrong = decoded.payload != payload && decoded.confidence >= 3
         XCTAssertFalse(silentlyWrong, "解错了却给出高置信度（信心=\(decoded.confidence)）")
     }
@@ -300,5 +301,84 @@ final class BlockCodecTests: XCTestCase {
         CGImageDestinationAddImage(destination, cgImage, nil)
         XCTAssertTrue(CGImageDestinationFinalize(destination))
         print("[sample] \(url.path)  payload=0x\(String(format: "%08X", payload))")
+    }
+}
+
+// MARK: - 128 bit 推荐布局
+
+final class WatermarkPayloadTests: XCTestCase {
+    private let keyHex = "00112233445566778899aabbccddeeff"
+
+    private func makeKey() throws -> SymmetricKey {
+        try XCTUnwrap(SymmetricKey(hex: keyHex))
+    }
+
+    func testPackUnpackRoundTrip() throws {
+        let payload = WatermarkPayload(
+            uid: 0xDEAD_BEEF,
+            timestamp: 1_765_000_000,
+            pageIndex: 5,
+            tag: 1,
+            key: try makeKey()
+        )
+        XCTAssertEqual(payload.bytes.count, WatermarkPayload.byteCount)
+        let restored = try XCTUnwrap(WatermarkPayload(bytes: payload.bytes))
+        XCTAssertEqual(restored, payload)
+        XCTAssertTrue(restored.isValid(key: try makeKey()))
+    }
+
+    func testHexKeyRejectsGarbage() {
+        XCTAssertNil(SymmetricKey(hex: "abc"))
+        XCTAssertNil(SymmetricKey(hex: "zz"))
+        XCTAssertNotNil(SymmetricKey(hex: "00ff"))
+    }
+
+    func testMACDetectsTampering() throws {
+        let payload = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: try makeKey())
+        var tampered = payload
+        tampered.uid = 99
+        XCTAssertFalse(tampered.isValid(key: try makeKey()), "改了字段 mac 必须校验不过")
+    }
+
+    func testMACChangesWithKey() throws {
+        let a = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: try makeKey())
+        let otherKey = try XCTUnwrap(SymmetricKey(hex: "ffeeddccbbaa99887766554433221100"))
+        let b = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: otherKey)
+        XCTAssertNotEqual(a.mac, b.mac)
+    }
+
+    /// 128 bit 载荷在推荐参数下的编解码回环：字段必须逐字节还原
+    func test128BitRoundTripOnRealisticContent() throws {
+        let payload = WatermarkPayload(
+            uid: 0x0BAD_F00D,
+            timestamp: 1_765_123_456,
+            pageIndex: 3,
+            tag: 7,
+            key: try makeKey()
+        )
+        // helper 只收 UInt32，128 bit 直接铺字节版 tile
+        var base = RGBAImage(width: 640, height: 900)
+        var seed: UInt64 = 7
+        for y in 0..<base.height {
+            for x in 0..<base.width {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                let v = UInt8(180 + (seed >> 60) % 60)
+                let i = (y * base.width + x) * 4
+                base.pixels[i] = v
+                base.pixels[i + 1] = v
+                base.pixels[i + 2] = v
+                base.pixels[i + 3] = 255
+            }
+        }
+        base.blendTiled(BlockCodec.makeTile(payload: payload.bytes))
+        let decoded = try XCTUnwrap(BlockCodec.decode(base, payloadBits: 128))
+        XCTAssertEqual(decoded.payloadBytes, payload.bytes)
+        XCTAssertEqual(decoded.weakBits, 0)
+        let restored = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
+        XCTAssertEqual(restored.uid, payload.uid)
+        XCTAssertEqual(restored.timestamp, payload.timestamp)
+        XCTAssertEqual(restored.pageIndex, payload.pageIndex)
+        XCTAssertEqual(restored.tag, payload.tag)
+        XCTAssertEqual(restored.mac, payload.mac)
     }
 }

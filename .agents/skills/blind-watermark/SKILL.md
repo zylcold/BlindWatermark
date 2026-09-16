@@ -12,53 +12,42 @@ LoveLink iOS 端会在整个界面上常驻一层肉眼不可见的色度扰动�
 
 ---
 
-## 一、容量：最多能放多少
+## 一、容量：128 bit，uid + 时间戳 + 页面 + 校验一次装下
 
-**载荷上限就是 32 bit（`UInt32`），这是硬上限，不随屏幕大小变化。**
-屏幕越大只是观测次数越多（解得更稳），不是能放更多内容。
+载荷上限 **256 bit**（每 tile 只重复 2 份，刚好还够翻转极性用），推荐 **128 bit**。
+标准布局是 `WatermarkPayload`，字段全小端：
 
-32 bit 换算成常见编码：
+```
+[127:96] uid        UInt32   用户 ID 原样放，不用截断、不用查表
+[ 95:64] timestamp  UInt32   Unix 秒，精确到秒且够用到 2106 年 —— 不用再换算时间桶
+[ 63:48] pageIndex  UInt16   页面注册表索引，最多 65536 个受监控页面
+[ 47:32] tag        UInt16   App / 端 / 环境 标识
+[ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断
+```
 
-| 想放的东西 | 上限 | 说明 |
+换算成字符量的话 128 bit ≈ 16 个 ASCII 字符，但**不要存字符串** —— 用上面的字段化布局。
+
+### 页面类名怎么进来
+
+`pageIndex` 不是类名（32 字节装不下字符串）。做法：接入端维护「索引 → 类名」注册表，
+页面出现时 `Watermark.update(payload:)` 重画图案（相位不变，解码端无感，微秒级）。
+解码后拿索引查同一张表还原类名。**没有注册表就只能拿到一个数字**，接这类工单前先要到表。
+
+### 密钥归属
+
+**密钥只在服务端持有**：服务端算好 mac 下发完整 16 字节，客户端只负责渲染；解码端 `--key` 校验。
+客户端自己算 mac 等于把密钥交出去。32 bit mac 挡顺手伪造（单次命中 1/2³²），
+挡不住针对性碰撞 —— 对抗强攻击就别塞业务字段，整个载荷做服务端票据。
+
+### 余量（实测，chroma，iPhone 16，弱 bit 全部 0/128）
+
+| 页面 | \|z\|中位 | 最弱 |
 |---|---|---|
-| ASCII 字符 | **4 个** | 8 bit/字符 |
-| Base32 字符 | **6 个** | 5 bit/字符，30 bit，最推荐 |
-| Base64 字符 | **5 个** | 6 bit/字符，30 bit |
-| 十进制数字 | **9 位** | `< 10^9` 只占 30 bit |
-| UUID | ❌ | 128 bit，装不下 |
-| 用户 ID（原样） | ❌ | 除非 ID 本身 ≤ 32 bit，一般是先映射成序号 |
+| text（最差场景） | 227.8 | 16.5 |
+| photo | 111.6 | 23.9 |
 
-放不下就**不要往水印里塞**。正确做法是水印放一个短序号，把「序号 → 用户/设备/时间」的映射表放服务端。
-水印是**定位线索**，不是数据库。
-
-### 推荐的生产布局
-
-把一个 32 bit 切成段，比塞一个语义模糊的大整数好用得多：
-
-```
-[31:20] 12 bit  用户序号（最多 4096 个，按注册顺序分配）
-[19:10] 10 bit  时间桶，600s 粒度 → 1024 个桶 ≈ 7.1 天环绕
-[ 9: 4]  6 bit  App / 端 / 环境标识（可区分百合/佳缘/嗨玩、iOS/Android、内测/正式）
-[ 3: 0]  4 bit  版本或随机盐，防跨版本误判
-```
-
-时间桶位数按需要的溯源时间窗取舍：**10 bit ≈ 7 天，12 bit ≈ 28 天，14 bit ≈ 113 天，16 bit ≈ 455 天**。
-时间窗越长，桶越粗或占位越多，留给用户序号的位就越少。
-
-### 容量与余量的取舍
-
-每个 bit 的观测次数 ≈ `整屏 pair 总数 / payloadBits`。iPhone 16（1179×2556）用 8px 块：
-
-tile 是 256 设备像素，8px 块 → **每 tile 512 个 pair**。
-
-| payloadBits | 每 tile 重复次数 | iPhone 16 上每 bit 观测次数 | 余量 |
-|---|---|---|---|
-| 32（默认，上限） | 16 | 727 | 充足，chroma 模式下 \|z\| 中位 300+ |
-| 16 | 32 | 1455 | 更充足，但只能放 2 个 ASCII 字符 |
-
-实际结论：**32 bit 全用满，余量仍然充裕**，不需要为了余量压缩容量。
-
----
+阈值 3，余量 30 倍以上。tile 是 256 设备像素 / 8px 块 → **每 tile 512 个 pair**，
+128 bit 每 tile 重复 4 份，iPhone 16 截图上每 bit 约 182 次观测。
 
 ## 二、怎么用
 
@@ -88,48 +77,39 @@ swift build -c release --package-path "$BW_REPO"
 ```
 
 ```bash
-"$BW_REPO/.build/release/bwdecode" /path/to/shot.png
-# 需要时: --bits 32 --plane chroma --offset X,Y
+"$BW_REPO/.build/release/bwdecode" shot.png --layout --key <服务端密钥hex>
+# 完整参数: --bits 128 --plane chroma --offset X,Y --layout --key <hex>
 ```
 
-输出：
+输出（两行）：
 
 ```
-payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=453.1  最弱=58.2  弱bit=0/32  OK(全部 32 bit 显著)
+payload=0xefbeadde123baa6a02000100a56d00a5  payloadBits=128  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=227.8  最弱=16.5  弱bit=0/128  OK(全部 128 bit 显著)
+uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0001)  mac=OK
 ```
 
 | 字段 | 含义 |
 |---|---|
-| `payload` | 32 bit 原始载荷，按接入端的布局切段解读 |
+| `payload` | 原始载荷 hex，小端字节序 |
 | `payloadBits` | 有效位数，必须与接入端一致 |
 | `平面` | `chroma`（默认，不可见）或 `luma` |
 | `相位` | 图案的像素偏移，整屏截图恒为 `(0,0)` |
-| `signal` | 平均特征差。chroma 默认参数下约 9；luma 下约等于 delta |
-| `\|z\|中位` | 各 bit 显著度中位数。chroma 实测 300+，luma 5~35，无水印约 0.5 |
+| `signal` | 平均特征差。chroma 默认参数下约 9 |
+| `\|z\|中位` / `最弱` | 各 bit 显著度。128 bit 下实测中位 100~230，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
-| 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤4 个弱 bit 要交叉验证；`NO` 大概率没水印 |
+| `uid` / `time` / `pageIndex` / `tag` | `--layout` 解出的字段 |
+| `mac` | `--key` 给了则校验：`OK` / `BAD` / `未校验` |
+| 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印 |
 
 ### 标准排查流程
 
 1. 先看判定。`NO` → 走下面的排查清单，别硬解读数字。
 2. `WEAK` → 结果可能对，但必须结合日志/用户描述交叉验证。
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
-4. 按接入端的布局切段，拿到用户序号/时间桶。
-5. 时间桶 → 时间范围（见下）。用户序号 → 查服务端映射表。
-6. 用设备与时间去日志/Sentry 里定位问题。
-
-**时间桶 → 时间范围**（默认 600s 粒度，桶序号低 16 位）：
-
-```bash
-python3 -c "
-import datetime, sys
-b = int(sys.argv[1], 16)
-print(datetime.datetime.utcfromtimestamp(b * 600), '~', datetime.datetime.utcfromtimestamp(b * 600 + 600))
-" 0xCDEF
-```
-
-桶位数不是 16 时先按布局取出来再换算。**桶序号每 `2^位数` 个环绕一次**（16 bit ≈ 455 天，10 bit ≈ 7 天），
-解出来的桶值明显大于近期取值时说明落在一圈之前，别当成未来时间。
+4. 加 `--layout` 解出 uid / time / pageIndex / tag。
+5. `pageIndex` 查接入端的页面注册表还原类名 —— 没表就只有数字。
+6. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，128 bit 布局的时间戳
+   已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
 
 ### 直接调用 API
 
@@ -137,8 +117,9 @@ print(datetime.datetime.utcfromtimestamp(b * 600), '~', datetime.datetime.utcfro
 import BlindWatermarkCore
 
 let image = RGBAImage(cgImage: cgImage)!
-let result = BlockCodec.decode(image, payloadBits: 32, plane: .chroma)
-print(result.payload, result.confidence, result.weakBits)
+let result = BlockCodec.decode(image, payloadBits: 128, plane: .chroma)!
+print(result.payloadBytes)                       // 16 字节
+let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / pageIndex / tag / mac
 ```
 
 ---
