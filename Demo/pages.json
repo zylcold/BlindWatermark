@@ -1,1 +1,8 @@
-["PlainPage", "WhitePage", "TextPage", "PhotoPage", "DarkPage", "MixedPage"]
+[
+  "BHPlainViewController",
+  "BHWhiteChatViewController",
+  "BHTextListViewController",
+  "BHPhotoGridViewController",
+  "BHDarkModeViewController",
+  "BHMixedFeedViewController"
+]

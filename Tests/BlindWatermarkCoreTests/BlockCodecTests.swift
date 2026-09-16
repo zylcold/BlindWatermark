@@ -304,7 +304,7 @@ final class BlockCodecTests: XCTestCase {
     }
 }
 
-// MARK: - 128 bit 推荐布局
+// MARK: - 256 bit 推荐布局
 
 final class WatermarkPayloadTests: XCTestCase {
     private let keyHex = "00112233445566778899aabbccddeeff"
@@ -317,11 +317,12 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0xDEAD_BEEF,
             timestamp: 1_765_000_000,
-            pageIndex: 5,
+            pageCode: 0x123456,
             tag: 1,
             key: try makeKey()
         )
         XCTAssertEqual(payload.bytes.count, WatermarkPayload.byteCount)
+        XCTAssertEqual(WatermarkPayload.byteCount, 32)
         let restored = try XCTUnwrap(WatermarkPayload(bytes: payload.bytes))
         XCTAssertEqual(restored, payload)
         XCTAssertTrue(restored.isValid(key: try makeKey()))
@@ -334,29 +335,42 @@ final class WatermarkPayloadTests: XCTestCase {
     }
 
     func testMACDetectsTampering() throws {
-        let payload = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: try makeKey())
+        let payload = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
         var tampered = payload
         tampered.uid = 99
         XCTAssertFalse(tampered.isValid(key: try makeKey()), "改了字段 mac 必须校验不过")
     }
 
+    func testMACTamperOnAnySignedFieldIsCaught() throws {
+        let base = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
+        var cases: [WatermarkPayload] = []
+        var a = base; a.uid = 9; cases.append(a)
+        var b = base; b.timestamp = 9; cases.append(b)
+        var c = base; c.pageCode = 9; cases.append(c)
+        var d = base; d.tag = 9; cases.append(d)
+        for tampered in cases {
+            XCTAssertFalse(tampered.isValid(key: try makeKey()))
+        }
+        XCTAssertTrue(base.isValid(key: try makeKey()))
+    }
+
     func testMACChangesWithKey() throws {
-        let a = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: try makeKey())
+        let a = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
         let otherKey = try XCTUnwrap(SymmetricKey(hex: "ffeeddccbbaa99887766554433221100"))
-        let b = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, key: otherKey)
+        let b = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: otherKey)
         XCTAssertNotEqual(a.mac, b.mac)
     }
 
-    /// 128 bit 载荷在推荐参数下的编解码回环：字段必须逐字节还原
-    func test128BitRoundTripOnRealisticContent() throws {
+    /// 256 bit 载荷在推荐参数下的编解码回环：字段必须逐字节还原
+    func test256BitRoundTripOnRealisticContent() throws {
         let payload = WatermarkPayload(
             uid: 0x0BAD_F00D,
             timestamp: 1_765_123_456,
-            pageIndex: 3,
-            tag: 7,
+            pageClassName: "BHProfileViewController",
+            app: 3,
             key: try makeKey()
         )
-        // helper 只收 UInt32，128 bit 直接铺字节版 tile
+        // helper 只收 UInt32，256 bit 直接铺字节版 tile
         var base = RGBAImage(width: 640, height: 900)
         var seed: UInt64 = 7
         for y in 0..<base.height {
@@ -371,13 +385,13 @@ final class WatermarkPayloadTests: XCTestCase {
             }
         }
         base.blendTiled(BlockCodec.makeTile(payload: payload.bytes))
-        let decoded = try XCTUnwrap(BlockCodec.decode(base, payloadBits: 128))
+        let decoded = try XCTUnwrap(BlockCodec.decode(base, payloadBits: WatermarkPayload.payloadBits))
         XCTAssertEqual(decoded.payloadBytes, payload.bytes)
         XCTAssertEqual(decoded.weakBits, 0)
         let restored = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
         XCTAssertEqual(restored.uid, payload.uid)
         XCTAssertEqual(restored.timestamp, payload.timestamp)
-        XCTAssertEqual(restored.pageIndex, payload.pageIndex)
+        XCTAssertEqual(restored.pageCode, payload.pageCode)
         XCTAssertEqual(restored.tag, payload.tag)
         XCTAssertEqual(restored.mac, payload.mac)
     }
@@ -411,7 +425,7 @@ final class AutoDecodeTests: XCTestCase {
     }
 
     private func makePayload() throws -> WatermarkPayload {
-        WatermarkPayload(uid: 0x1234_5678, timestamp: 1_760_000_000, pageIndex: 2, tag: 1, key: try key())
+        WatermarkPayload(uid: 0x1234_5678, timestamp: 1_760_000_000, pageClassName: "BHProfileViewController", app: 1, key: try key())
     }
 
     /// 裁剪 + 相位未知 + 平面未指定：MAC 裁决必须命中唯一正确解
@@ -420,11 +434,11 @@ final class AutoDecodeTests: XCTestCase {
         let image = shot(payload: payload.bytes, plane: .chroma, offset: (5, 3))
         let decoded = try XCTUnwrap(BlockCodec.decodeBest(
             image,
-            payloadBitsCandidates: [128, 32],
+            payloadBitsCandidates: [WatermarkPayload.payloadBits, 32],
             planes: [.chroma, .luma],
             searchPhase: true,
             validate: { [secret = try key()] candidate in
-                guard candidate.payloadBits == 128,
+                guard candidate.payloadBits == WatermarkPayload.payloadBits,
                       let fields = WatermarkPayload(bytes: candidate.payloadBytes) else { return false }
                 return fields.isValid(key: secret)
             }
@@ -472,7 +486,7 @@ final class AutoDecodeTests: XCTestCase {
             searchPhase: true,
             searchTile: true,
             validate: { candidate in
-                guard candidate.payloadBits == 128,
+                guard candidate.payloadBits == WatermarkPayload.payloadBits,
                       let fields = WatermarkPayload(bytes: candidate.payloadBytes) else { return false }
                 return fields.isValid(key: seconds)
             }
@@ -480,7 +494,7 @@ final class AutoDecodeTests: XCTestCase {
         XCTAssertEqual(decoded.payloadBytes, payload.bytes)
         let fields = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
         XCTAssertEqual(fields.uid, payload.uid)
-        XCTAssertEqual(fields.pageIndex, payload.pageIndex)
+        XCTAssertEqual(fields.pageCode, payload.pageCode)
     }
 
     /// 只搜相位不搜旋转，裁过的图必然解错 —— 固化这个失败模式，防止有人把旋转搜索删掉
@@ -497,21 +511,90 @@ final class AutoDecodeTests: XCTestCase {
         XCTAssertNotEqual(decoded.payloadBytes, payload.bytes, "不搜旋转时本来就会解错；能解对说明测试构造失效了")
     }
 
-    func testPageRegistryRoundTrip() throws {
+    func testPageRegistryMatchesByCode() throws {
         var registry = PageRegistry(names: [])
-        XCTAssertEqual(registry.index(for: "BHLoginViewController"), 0)
-        XCTAssertEqual(registry.index(for: "BHChatListViewController"), 1)
-        XCTAssertEqual(registry.index(for: "BHLoginViewController"), 0, "同名必须复用索引")
-        XCTAssertEqual(registry.name(for: 1), "BHChatListViewController")
-        XCTAssertNil(registry.name(for: 99), "越界必须返回 nil，不能硬猜")
+        registry.register("BHLoginViewController")
+        registry.register("BHChatListViewController")
+        registry.register("BHProfileViewController")
+        registry.register("BHLoginViewController")
+        XCTAssertEqual(registry.names.count, 3, "重复登记必须幂等")
+
+        XCTAssertEqual(registry.matches(code: PageNameCodec.code(for: "BHProfileViewController")), ["BHProfileViewController"])
+        XCTAssertTrue(registry.matches(code: "zzzz").isEmpty)
 
         let data = try XCTUnwrap(registry.jsonData)
         let restored = try XCTUnwrap(PageRegistry(data: data))
         XCTAssertEqual(restored, registry)
     }
 
+    /// 注册表按类名归一化匹配，因此换版本不会像索引方案那样整体错位
+    func testRegistrySurvivesVersionDrift() throws {
+        let old = PageRegistry(names: ["BHProfileViewController", "BHOrderViewController"])
+        let new = PageRegistry(names: ["BHOrderViewController", "BHProfileViewController", "BHNewFeatureViewController"])
+        let code = PageNameCodec.code(for: "BHProfileViewController")
+        XCTAssertEqual(old.matches(code: code), new.matches(code: code))
+    }
+
     func testPageRegistryRejectsGarbage() {
         XCTAssertNil(PageRegistry(data: Data("[1,2,3]".utf8)))
         XCTAssertNil(PageRegistry(data: Data("{}".utf8)))
+    }
+}
+
+// MARK: - 类名短码
+
+final class PageNameCodecTests: XCTestCase {
+    func testStripsRedundantSuffixAndPrefix() {
+        XCTAssertEqual(PageNameCodec.code(for: "BHProfileViewController"), "profile")
+        XCTAssertEqual(PageNameCodec.code(for: "BHChatListViewController"), "chatlist")
+        XCTAssertEqual(PageNameCodec.code(for: "BHLiveRoomViewController"), "liveroom")
+        XCTAssertEqual(PageNameCodec.code(for: "BHLoginViewController"), "login")
+        XCTAssertEqual(PageNameCodec.code(for: "JYOrderDetailViewController"), "orderdetai")
+    }
+
+    func testHandlesPlainAndExoticNames() {
+        // 名字就是后缀时会被剥成空，于是退而剥短一档的 "Controller"，剩 "View"
+        XCTAssertEqual(PageNameCodec.code(for: "ViewController"), "view")
+        XCTAssertEqual(PageNameCodec.code(for: "VC"), "vc", "剥到空则保留原名")
+        XCTAssertEqual(PageNameCodec.code(for: "Module.BHProfileViewController"), "profile", "模块前缀要丢掉")
+        XCTAssertEqual(PageNameCodec.code(for: "BHUser_Profile_VC"), "userprofil", "下划线不参与短码，超 10 字符截断")
+        XCTAssertEqual(PageNameCodec.code(for: ""), "")
+    }
+
+    func testShortNamePads() {
+        XCTAssertEqual(PageNameCodec.decode(PageNameCodec.encode("ab")), "ab")
+        XCTAssertEqual(PageNameCodec.code(for: "BHVC"), "bh")
+    }
+
+    func testEncodeDecodeRoundTrip() {
+        for name in ["BHProfileViewController", "BHChatListViewController", "JYOrderDetailViewController",
+                     "ABC", "ViewController", "x", ""] {
+            let code = PageNameCodec.code(for: name)
+            XCTAssertEqual(PageNameCodec.decode(PageNameCodec.encode(code)), code, name)
+            XCTAssertLessThanOrEqual(PageNameCodec.encode(code), 0x0FFF_FFFF_FFFF_FFFF, "必须塞进 60 bit")
+        }
+    }
+
+    func testLongNamesUseFullTenCharacters() {
+        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController").count, 10)
+        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController"), "userprofil")
+    }
+
+    /// 4 字符时 1000 个页面撞名概率 23%（生日问题），扩到 10 字符后这批名字必须互不相同
+    func testCommonNamesDoNotCollide() {
+        let names = [
+            "BHProfileViewController", "BHChatListViewController", "BHLiveRoomViewController",
+            "BHLoginViewController", "BHOrderViewController", "BHPayCenterViewController",
+            "BHUserDetailViewController", "BHSearchViewController", "BHMatchViewController",
+            "BHSettingsViewController", "BHFeedbackViewController", "BHPhotoGridViewController",
+            "BHDarkModeViewController", "BHMixedFeedViewController", "BHTextListViewController",
+            "BHWhiteChatViewController", "BHPlainViewController",
+        ]
+        let codes = names.map { PageNameCodec.code(for: $0) }
+        XCTAssertEqual(Set(codes).count, names.count, "这批名字不应互撞：\(codes)")
+    }
+
+    func testGrepHintCarriesCode() {
+        XCTAssertTrue(PageNameCodec.grepHint(forCode: "chatlist").contains("chatlist"))
     }
 }

@@ -11,7 +11,8 @@ import BlindWatermarkCore
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
 //   --layout  按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
 //   --key     服务端密钥（hex），配合 --layout 校验 mac
-//   --pages   页面注册表 JSON（字符串数组），把 pageIndex 还原成类名
+//   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
+//   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
 //   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × {128,32} 位数，
 //             给了 --key 用 MAC 裁决，没给就退回 medianAbsZ（不如 MAC 可靠）
 
@@ -29,6 +30,7 @@ var showLayout = false
 var key: SymmetricKey?
 var pages: PageRegistry?
 var auto = false
+var dumpCodes = false
 
 var index = 1
 let arguments = CommandLine.arguments
@@ -67,6 +69,8 @@ while index < arguments.count {
         pages = registry
     case "--auto":
         auto = true
+    case "--dump-codes":
+        dumpCodes = true
     case "--key":
         index += 1
         guard index < arguments.count, let value = SymmetricKey(hex: arguments[index]) else {
@@ -83,8 +87,19 @@ while index < arguments.count {
     index += 1
 }
 
+if dumpCodes {
+    guard let pages else {
+        fail("--dump-codes 需要配合 --pages 使用", code: 2)
+    }
+    print("code  类名")
+    for entry in pages.codeTable {
+        print("\(entry.code.padding(toLength: 6, withPad: " ", startingAt: 0))\(entry.name)")
+    }
+    exit(0)
+}
+
 guard let path else {
-    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma] [--layout] [--key <hex>]", code: 2)
+    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma] [--layout] [--key <hex>] [--pages <json>] [--auto]", code: 2)
 }
 
 let url = URL(fileURLWithPath: path)
@@ -179,24 +194,36 @@ if showLayout {
     } else {
         macLine = "mac=未校验(需要 --key)"
     }
-    let pageName: String
+    // 新旧布局的 mac 覆盖范围相同（都是前 12 字节），所以旧截图 mac 照样通过，
+    // 但 page/tag 字段边界变了 —— 靠 layout 版本位显式提示，别让 agent 误读。
+    if fields.layoutVersion != WatermarkPayload.layoutVersion {
+        print("注意: 这张截图是 layout=v\(fields.layoutVersion)，当前布局是 v\(WatermarkPayload.layoutVersion)，"
+            + "page/tag 字段边界不同，下面的解读可能是错的")
+    }
+    let code = fields.pageNameCode
+    let pageLine: String
     if let pages {
-        if let name = pages.name(for: Int(fields.pageIndex)) {
-            pageName = "page=\(name)"
-        } else {
-            pageName = "page=<索引越界：注册表与截图版本不符>"
+        let hits = pages.matches(code: code)
+        switch hits.count {
+        case 1:
+            pageLine = "page=\(code) → \(hits[0])"
+        case 0:
+            pageLine = "page=\(code)（注册表无命中，换版本或没登记；\(PageNameCodec.grepHint(forCode: code))）"
+        default:
+            pageLine = "page=\(code) → \(hits.count) 个候选: \(hits.joined(separator: ", "))"
         }
     } else {
-        pageName = "pageIndex=\(fields.pageIndex)(给 --pages 可还原类名)"
+        pageLine = "page=\(code)（无注册表，直接 \(PageNameCodec.grepHint(forCode: code))）"
     }
     print(String(
-        format: "uid=%u(0x%08X)  time=%@  %@  tag=%u(0x%04X)  %@",
+        format: "uid=%u(0x%08X)  time=%@  %@  layout=v%u app=%u env=%u  %@",
         fields.uid,
         fields.uid,
         formatter.string(from: date),
-        pageName,
-        fields.tag,
-        fields.tag,
+        pageLine,
+        fields.layoutVersion,
+        fields.app,
+        fields.environment,
         macLine
     ))
 }

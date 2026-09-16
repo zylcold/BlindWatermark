@@ -2,9 +2,11 @@ import Foundation
 
 /// 页面注册表：`pageIndex → 类名` 的唯一权威映射。
 ///
-/// 水印里只能放 16 bit 的页面索引，类名要靠这张表还原。
-/// 接入端生成 JSON，解码端 `bwdecode --pages` 加载同一份 —— **两边必须是同一张表**，
-/// 表换了版本，旧截图解出的索引就对不上，所以建议带版本号进 git。
+/// 水印里放的是**从类名算出来的 4 字符短码**（见 `PageNameCodec`），所以这张表是**可选**的：
+/// 没有表也能靠短码 `grep` 定位类名，表只用来在同码多命中时精确去歧义。
+///
+/// 因为它按「类名归一化」匹配而不是按下标匹配，**表与截图版本不一致也不会失效** ——
+/// 这是相对索引方案的关键好处。接入端生成 JSON，解码端 `bwdecode --pages` 加载。
 ///
 /// 文件格式就是字符串数组，索引即数组下标：
 ///
@@ -30,18 +32,22 @@ public struct PageRegistry: Equatable {
         self.names = array
     }
 
-    /// 索引越界返回 nil —— 拿到 nil 说明注册表和截图不是同一版本，别硬猜类名。
-    public func name(for index: Int) -> String? {
-        guard names.indices.contains(index) else { return nil }
-        return names[index]
+    /// 短码命中的类名。0 个说明这份表里没有该页面；多个就结合截图内容判断。
+    public func matches(code: String) -> [String] {
+        guard !code.isEmpty else { return [] }
+        return names.filter { PageNameCodec.code(for: $0) == code }
     }
 
-    /// 反查：类名 → 索引。接入端生成载荷时用；不存在就追加并返回新索引，
-    /// 这样页面出现顺序天然决定索引，不需要提前登记。
-    public mutating func index(for name: String) -> Int {
-        if let found = names.firstIndex(of: name) { return found }
+    /// 类名 → 短码的全量对照表，`bwdecode --dump-codes` 用，也方便 agent 一眼扫完。
+    public var codeTable: [(code: String, name: String)] {
+        names.map { (PageNameCodec.code(for: $0), $0) }
+            .sorted { $0.0 < $1.0 }
+    }
+
+    /// 登记一个类名（不重复）。接入端可以在启动时把受监控页面都塞进来再落盘。
+    public mutating func register(_ name: String) {
+        guard !names.contains(name) else { return }
         names.append(name)
-        return names.count - 1
     }
 
     public var jsonData: Data? {

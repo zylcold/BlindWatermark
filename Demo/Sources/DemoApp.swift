@@ -23,7 +23,7 @@ struct DemoApp: App {
 enum DemoWatermark {
     static let keyHex = "00112233445566778899aabbccddeeff"
     static let demoUID: UInt32 = 0xDEAD_BEEF
-    static let demoTag: UInt16 = 1
+    static let demoTag: UInt32 = 1
 
     static func install(page: DemoPage) {
         let env = ProcessInfo.processInfo.environment
@@ -42,12 +42,11 @@ enum DemoWatermark {
 
     private static func payload(page: DemoPage) -> [UInt8] {
         guard let key = SymmetricKey(hex: keyHex) else { fatalError("demo key 不合法") }
-        let index = UInt16(DemoPage.allCases.firstIndex(of: page) ?? 0)
         return WatermarkPayload(
             uid: demoUID,
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
-            pageIndex: index,
-            tag: demoTag,
+            pageClassName: page.className,
+            app: demoTag,
             key: key
         ).bytes
     }
@@ -82,6 +81,18 @@ enum DemoPage: String, CaseIterable, Identifiable {
     }
 
     var index: Int { DemoPage.allCases.firstIndex(of: self) ?? 0 }
+
+    /// 模拟真实项目里的 VC 命名，用来演示短码压缩后还剩几个字符可用
+    var className: String {
+        switch self {
+        case .plain: return "BHPlainViewController"
+        case .white: return "BHWhiteChatViewController"
+        case .text: return "BHTextListViewController"
+        case .photo: return "BHPhotoGridViewController"
+        case .dark: return "BHDarkModeViewController"
+        case .mixed: return "BHMixedFeedViewController"
+        }
+    }
 }
 
 /// 页脚：把打进去的 uid / 页面索引亮出来，方便肉眼核对解码结果
@@ -89,7 +100,7 @@ struct PayloadFooter: View {
     let page: DemoPage
 
     var body: some View {
-        Text("uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  pageIndex=\(page.index)  tag=\(DemoWatermark.demoTag)")
+        Text("uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  \(page.className) → \(PageNameCodec.code(for: page.className))  app=\(DemoWatermark.demoTag)")
             .font(.caption2.monospaced())
             .foregroundStyle(.secondary)
     }

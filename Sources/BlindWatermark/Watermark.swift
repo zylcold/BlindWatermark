@@ -200,9 +200,9 @@ enum WatermarkDefaultPayload {
         WatermarkPayload(
             uid: deviceHash(),
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
-            pageIndex: 0,
-            tag: 0,
-            mac: 0
+            pageCode: 0,
+            tag: WatermarkPayload.layoutVersion << 28,
+            mac: []
         ).bytes
     }
 
