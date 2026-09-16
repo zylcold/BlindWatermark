@@ -178,6 +178,16 @@ final class BlockCodecTests: XCTestCase {
         XCTAssertLessThan(decoded.confidence, 2, "无水印画面不应给出高置信度")
     }
 
+    /// 容量与余量都建立在这组几何常数上，钉住它，改块大小/ tile 大小会立刻炸出来。
+    func testTileGeometryContract() {
+        XCTAssertEqual(BlockCodec.blockSize, 8)
+        XCTAssertEqual(BlockCodec.tileSize, 256)
+        // (256/8/2) 个 pair 列 × (256/8) 个块行
+        XCTAssertEqual(BlockCodec.pairsPerTile, 512)
+        // iPhone 16 截图 1179x2556：(1179/8/2) × (2556/8) = 23287 个 pair
+        // payloadBits = 32 → 每 bit 727 次观测；16 → 1455 次
+    }
+
     // MARK: - 平面选择
 
     /// chroma 的卖点就是「亮度一个像素都没动」，也就是肉眼看不到亮度网格。
