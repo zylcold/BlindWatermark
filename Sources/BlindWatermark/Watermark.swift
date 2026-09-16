@@ -18,16 +18,24 @@ public enum Watermark {
         payload: [UInt8],
         payloadBits: Int? = nil,
         delta: UInt8 = 8,
-        plane: WatermarkPlane = .chroma
+        plane: WatermarkPlane = .chroma,
+        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
     ) {
         WatermarkState.shared.configure(
             payload: payload,
             payloadBits: payloadBits ?? payload.count * 8,
             delta: delta,
-            plane: plane
+            plane: plane,
+            windowLevel: windowLevel
         )
         WatermarkState.shared.start()
     }
+
+    /// 默认盖在系统弹窗之上（`.alert + 1`）：截图要能溯源到弹窗场景。
+    /// 水印层不参与交互（`isUserInteractionEnabled = false` + `hitTest` 返回 nil），
+    /// 亮度残差 0.07/255，盖上去也看不出、点不到。
+    /// 若目标 App 的某些系统 UI 真出了问题，调低它，代价是那些画面截不出水印。
+    public static let defaultWindowLevel: UIWindow.Level = .alert + 1
 
     /// 换页面时重画图案。相位不变，解码端无感；生成一张 tile 是微秒级，导航时随手调。
     ///
@@ -72,6 +80,7 @@ final class WatermarkState {
         var payloadBits: Int
         var delta: UInt8
         var plane: WatermarkPlane
+        var windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
     }
 
     var payloadProvider: (() -> [UInt8])?
@@ -83,8 +92,20 @@ final class WatermarkState {
 
     private init() {}
 
-    func configure(payload: [UInt8], payloadBits: Int, delta: UInt8, plane: WatermarkPlane) {
-        config = Config(payload: payload, payloadBits: payloadBits, delta: delta, plane: plane)
+    func configure(
+        payload: [UInt8],
+        payloadBits: Int,
+        delta: UInt8,
+        plane: WatermarkPlane,
+        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
+    ) {
+        config = Config(
+            payload: payload,
+            payloadBits: payloadBits,
+            delta: delta,
+            plane: plane,
+            windowLevel: windowLevel
+        )
     }
 
     /// 幂等。首次调用注册通知，之后只刷新图案。
@@ -138,7 +159,7 @@ final class WatermarkState {
         let key = ObjectIdentifier(scene)
         guard windows[key] == nil else { return }
         guard let pattern = makePattern(scale: scene.traitCollection.displayScale) else { return }
-        windows[key] = WatermarkWindow(scene: scene, pattern: pattern)
+        windows[key] = WatermarkWindow(scene: scene, pattern: pattern, level: effectiveConfig().windowLevel)
     }
 
     func refreshPatterns() {

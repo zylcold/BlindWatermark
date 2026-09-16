@@ -77,9 +77,17 @@ swift build -c release --package-path "$BW_REPO"
 ```
 
 ```bash
-"$BW_REPO/.build/release/bwdecode" shot.png --layout --key <服务端密钥hex>
-# 完整参数: --bits 128 --plane chroma --offset X,Y --layout --key <hex>
+# 常规（最快）
+"$BW_REPO/.build/release/bwdecode" shot.png --layout --pages <页面注册表.json> --key <服务端密钥hex>
+
+# 截图被裁过 / 参数不确定（0.5s，穷举 + MAC 裁决）
+"$BW_REPO/.build/release/bwdecode" shot.png --auto --layout --pages <页面注册表.json> --key <服务端密钥hex>
 ```
+
+**优先用 `--auto` 并带上 `--key`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
+却依然自洽：`|z|` 中位 98、弱 bit 0/128，输出看着完全正常，但 uid/时间/页面全是错的。
+`--auto` 穷举 2 平面 × 64 相位 × 512 tile 旋转 × 位数，只有 MAC 能识别出正确那一组。
+没有 `--key` 时 `--auto` 只能用时间戳合理性做弱校验，可靠性差一个档次 —— **能要到密钥就去要。**
 
 输出（两行）：
 
@@ -106,10 +114,21 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0
 1. 先看判定。`NO` → 走下面的排查清单，别硬解读数字。
 2. `WEAK` → 结果可能对，但必须结合日志/用户描述交叉验证。
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
-4. 加 `--layout` 解出 uid / time / pageIndex / tag。
-5. `pageIndex` 查接入端的页面注册表还原类名 —— 没表就只有数字。
+4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把索引还原成类名。
+   界面提示「索引越界：注册表与截图版本不符」说明注册表和这张截图不是同一版，别硬猜。
 6. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，128 bit 布局的时间戳
    已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
+
+### 页面注册表
+
+接入端 `PageRegistry(names:).index(for: className)` 登记（页面出现顺序即索引），
+`write(to:)` 落盘；解码端 `--pages` 加载同一份 JSON。格式就是字符串数组：
+
+```json
+["BHLoginViewController", "BHProfileViewController", "BHChatListViewController"]
+```
+
+越界返回 `nil` 而不是硬猜类名。表换版本旧截图就对不上，建议带版本号进 git。
 
 ### 直接调用 API
 
@@ -120,6 +139,13 @@ let image = RGBAImage(cgImage: cgImage)!
 let result = BlockCodec.decode(image, payloadBits: 128, plane: .chroma)!
 print(result.payloadBytes)                       // 16 字节
 let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / pageIndex / tag / mac
+
+// 参数不确定时：穷举 + MAC 裁决
+let key = SymmetricKey(hex: serverKeyHex)!
+let best = BlockCodec.decodeBest(image, validate: { decoded in
+    guard let f = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+    return f.isValid(key: key)
+})!
 ```
 
 ---
