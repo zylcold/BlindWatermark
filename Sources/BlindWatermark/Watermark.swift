@@ -11,7 +11,7 @@ public enum Watermark {
     /// 手动接入：立刻设置 payload，并挂载到当前所有 scene（后续新 scene 自动挂载）。
     ///
     ///     Watermark.install(payload: serverIssuedPayload)
-    public static func install(payload: UInt32, payloadBits: Int = 32, delta: UInt8 = 3) {
+    public static func install(payload: UInt32, payloadBits: Int = 32, delta: UInt8 = 6) {
         WatermarkState.shared.configure(
             payload: payload,
             payloadBits: payloadBits,
@@ -120,7 +120,7 @@ final class WatermarkState {
     private func effectiveConfig() -> Config {
         if let config { return config }
         let payload = payloadProvider?() ?? WatermarkDefaultPayload.current()
-        return Config(payload: payload, payloadBits: 32, delta: 3)
+        return Config(payload: payload, payloadBits: 32, delta: 6)
     }
 
     private func makePattern(scale: CGFloat) -> UIImage? {

@@ -1,0 +1,23 @@
+name: Demo
+options:
+  bundleIdPrefix: com.zylcold
+  deploymentTarget:
+    iOS: "15.0"
+packages:
+  BlindWatermark:
+    path: ..
+targets:
+  Demo:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: BlindWatermark
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zylcold.blindwatermark.demo
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        SWIFT_VERSION: "5.9"

@@ -7,13 +7,25 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的亮度扰�
 
 ## 原理
 
-- 覆盖全屏的是 **16×16 像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
+- 覆盖全屏的是 **8×8 像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
 - 每两个相邻块 (A, B) 编码 1 bit：`1` → A 压暗 B 提亮；`0` → A 提亮 B 压暗。
 - 解码取 `d = mean(A) − mean(B)`：压暗块的减益是 `−base·α`，提亮块的增益是 `(255−base)·α`，
   两者相加把 `base` 抵消 → `d ≈ ∓alpha`。**与底色无关**，白底、黑底、深色照片都能解。
 - 同一个 bit 的多份重复观测里**隔一份翻转极性**：水印分量同向累加，画面自身的亮度梯度正负相消。
 - 读码不是取符号，而是按带符号差值累加后除以标准误得到 z 值：水印随观测次数线性累加，
-  内容噪声按 `1/√n` 衰减。手机截图几十个 tile 重复，每个 bit 上百次观测。
+  内容噪声按 `1/√n` 衰减。一张 iPhone 截图每 bit 有约 360 次观测。
+
+参数是**模拟器实测**定下来的（iPhone 16，3x，真实版式：浅色渐变 + 文字 + 深色卡片）：
+
+| 方案 | \|z\| 中位 | 弱 bit | 结论 |
+|---|---|---|---|
+| 16px 块，delta 3 | 1.9 | 27/32 | 解出来是运气 |
+| 8px 块，delta 3 | 3.3 | 12/32 | 仍不稳 |
+| **8px 块，delta 6（默认）** | **6.4** | **0/32** | **可靠** |
+| 无水印对照 | 0.5 | 32/32 | 不误报 |
+
+代价：平坦区域有 6/255 ≈ 2.4% 的 8px 棋盘纹理，凑近看能察觉。要更隐蔽就调低 delta，
+但必须接受弱 bit 增多、结论变得不可靠。
 
 ## 接入
 
@@ -59,7 +71,7 @@ pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
 |---|---|---|
 | `payload` | — | 32 bit 载荷，低位在前 |
 | `payloadBits` | 32 | 有效位数 1...32，解码端必须一致 |
-| `delta`（代码里叫 `alpha`） | 3 | 扰动幅度。**下限 2**，更低会被色域转换与量化吃掉 |
+| `delta`（代码里叫 `alpha`） | 6 | 扰动幅度。**下限 2**，更低会被色域转换与量化吃掉 |
 | `offsetX/offsetY` | 0 | 解码时的图案相位，截图被裁过才需要 |
 
 ## 解码
@@ -70,11 +82,19 @@ swift build -c release
 ```
 
 ```
-payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=3.00  confidence=74.5  OK
+payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=12.9  |z|中位=6.4  最弱=3.4  弱bit=0/32  OK(全部 32 bit 显著)
 ```
 
-`confidence` 是各 bit 显著度 `|z|` 的**最小值**，即最弱那 bit 的可靠度。
-`>= 3` 每 bit 可靠，`1.5 ~ 3` 勉强，`< 1.5` 画面里大概没有水印。
+判读看**弱 bit 数**（`|z| < 3` 的 bit 个数），不看最弱那一个 —— 真实界面上个别 bit 的 z
+天然会塌，全局最小值太苛刻：
+
+```
+OK   弱 bit = 0            每 bit 都显著，结论可信
+WEAK 弱 bit <= 32/8 = 4    勉强解出，结论要交叉验证
+NO   弱 bit 更多           画面里大概没有水印
+```
+
+无水印画面实测 `|z|` 中位 0.5、弱 bit 32/32，与带水印画面分得很开。
 
 Agent 用法见 [`.agents/skills/blind-watermark/SKILL.md`](.agents/skills/blind-watermark/SKILL.md)。
 
@@ -95,9 +115,28 @@ Agent 用法见 [`.agents/skills/blind-watermark/SKILL.md`](.agents/skills/blind
 `swift test` 覆盖（11 例）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
 JPEG q=0.8 与 q=0.6、局部裁剪、`delta = 2` 下限、无水印画面不误报。
 
+**模拟器实测**（`Demo/`，iPhone 16）：`xcodegen generate` 生成工程后构建安装，
+浅色渐变 + 文字 + 深色卡片版式上解出 `payload=0xDEADBEEF`、弱 bit 0/32；
+深色外观同样 0/32；模拟器主屏（无水印）32/32 弱 bit，不误报。
+
 **未验证**：拍屏（另一台手机拍屏幕）—— 摩尔纹与几何畸变会让块网格完全歪掉，需要同步模板 +
 深度学习那一路方案，本仓库不做。**截图被缩放也解不出来**（块边长与平铺周期一起变了），
 只支持原始设备像素分辨率。
+
+## 模拟器冒烟
+
+```bash
+cd Demo && xcodegen generate
+xcodebuild -project Demo.xcodeproj -scheme Demo \
+  -destination 'id=<模拟器UDID>' -derivedDataPath /tmp/bwdd build
+xcrun simctl install booted /tmp/bwdd/Build/Products/Debug-iphonesimulator/Demo.app
+xcrun simctl launch booted com.zylcold.blindwatermark.demo
+xcrun simctl io booted screenshot /tmp/shot.png
+.build/release/bwdecode /tmp/shot.png
+```
+
+调参用环境变量（需要 `xcrun simctl launch` 前缀 `SIMCTL_CHILD_`）：
+`SIMCTL_CHILD_BW_PAYLOAD=0x1234 SIMCTL_CHILD_BW_DELTA=8`。
 
 ## 合规
 

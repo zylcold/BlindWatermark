@@ -35,7 +35,7 @@ swift run -c release --package-path "$BW_REPO" bwdecode <截图路径>
 输出：
 
 ```
-payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=3.00  confidence=74.5  OK
+payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,0)  signal=3.00  |z|中位=74.5  最弱=74.5  弱bit=0/32  OK(全部 32 bit 显著)
 ```
 
 | 字段 | 含义 |
@@ -43,9 +43,10 @@ payload=0x00ABCDEF  高16位=0x00AB  低16位=0xCDEF  payloadBits=32  相位=(0,
 | `payload` | 32 bit 原始载荷 |
 | `高16位` | 默认布局下是设备标识哈希 |
 | `低16位` | 默认布局下是时间桶序号 |
-| `signal` | 平均亮度差，应接近打水印端设定的 delta（默认 3） |
-| `confidence` | 各 bit 显著度（\|z\|）的**最小值**，即最弱那 bit 的可靠度 |
-| 末尾判定 | `OK` = 每 bit 都可靠；`WEAK` = 勉强解出，结论要谨慎；`NO` = 画面里可能没有水印 |
+| `signal` | 平均亮度差，应接近打水印端设定的 delta（默认 6） |
+| `\|z\|中位` | 各 bit 显著度中位数，带水印画面实测约 6+，无水印约 0.5 |
+| `弱bit` | \|z\| < 3 的 bit 个数，**判读就看它** |
+| 末尾判定 | `OK` 弱 bit=0，结论可信；`WEAK` ≤4 个弱 bit，要交叉验证；`NO` 大概率没水印 |
 
 ## 解读 payload（默认布局）
 
@@ -70,12 +71,13 @@ print(datetime.datetime.utcfromtimestamp(b * 600), '~', datetime.datetime.utcfro
 
 ## 排查顺序
 
-1. `NO` / `confidence` 很低 → 先怀疑图片本身：
+1. `NO` / 弱 bit 很多 → 先怀疑图片本身：
    - **必须用原始全屏截图**。缩放、二次转发、微信压缩都会改块边长与平铺周期，直接解不出来。
    - 截图被裁过（比如裁掉状态栏）→ 手动给相位：`--offset 0,-<裁掉的高度>`。
    - 图片是转发来的缩略图 → 让用户重发原图。
 2. `WEAK` → 结果可能对，但不要单凭它下结论；结合日志/用户描述交叉验证。
-3. 解出来但 payload 看着不像预期布局 → 看目标 App 的 `payloadProvider` 与 `payloadBits` 设置，
+3. `OK` 也要核对 `signal` 是否接近 6：如果 `signal` 明显偏离，说明图案没对上。
+4. 解出来但 payload 看着不像预期布局 → 看目标 App 的 `payloadProvider` 与 `payloadBits` 设置，
    必要时用 `--bits N` 对齐位数。
 
 ## 直接调用 API（不经过命令行）

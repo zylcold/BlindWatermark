@@ -4,7 +4,7 @@ import Foundation
 /// 屏上盲水印编解码。
 ///
 /// ## 编码
-/// 覆盖全屏的是 16×16 **像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
+/// 覆盖全屏的是 8×8 **像素块**平铺图案，不是单像素噪点 —— 块内平坦，过 JPEG 不会被抹掉。
 /// 每两个相邻块 (A,B) 编码 1 bit：
 /// - `1` → A 压暗、B 提亮
 /// - `0` → A 提亮、B 压暗
@@ -15,14 +15,14 @@ import Foundation
 /// **与底色无关** —— 白底、黑底、深色照片都能解。
 ///
 /// ## 为什么翻转极性
-/// 相邻块的均值差里还混着**内容本身的亮度梯度**（渐变背景、照片），梯度大时能压过 delta=3。
+/// 相邻块的均值差里还混着**内容本身的亮度梯度**（渐变背景、照片），梯度大时能压过 delta。
 /// 于是同一个 bit 的多份重复观测里，隔一份把黑白极性反过来（解码端同步翻符号）：
 /// 水印分量同向累加，梯度分量正负相消。
 ///
 /// 注意不能把翻转做成棋盘：bit 索引固定了列，同一 bit 的所有观测行奇偶性一致，棋盘翻不动它。
 ///
 /// ## 为什么软累加而不是符号投票
-/// 相邻块的差异里，内容本身（文字边缘、照片细节）经常远大于 delta=3。只取符号等于把水印丢掉。
+/// 相邻块的差异里，内容本身（文字边缘、照片细节）经常远大于 delta。只取符号等于把水印丢掉。
 /// 于是按**带符号的差值累加**，再除以标准误得到每个 bit 的 z 值：
 /// 水印分量随观测次数线性累加，内容噪声按 1/√n 衰减。手机截图有几十个 tile 重复，
 /// 每个 bit 上百次观测，足以把信噪比拉回来。
@@ -32,8 +32,9 @@ import Foundation
 /// ## 限制
 /// 截图必须是**原始设备像素**分辨率。缩放会改变块边长与平铺周期，解码失效。
 public enum BlockCodec {
-    /// 块边长（设备像素）
-    public static let blockSize = 16
+    /// 块边长（设备像素）。8：模拟器实测 16 块在真实 UI 上 |z| 中位只有 1.9，
+    /// 块减半让观测数 x4 且相邻块内容更相关，z 提升约 3 倍。
+    public static let blockSize = 8
     /// 平铺周期（设备像素）
     public static let tileSize = 256
     /// tile 内每行的 pair 数
@@ -51,8 +52,12 @@ public enum BlockCodec {
         public let offsetY: Int
         /// 平均 |d|，理想值 ≈ alpha。被内容噪声主导，只作诊断用
         public let signal: Double
-        /// 各 bit z 值的平均绝对值。判断相位是否正确、画面里有没有水印都看这个
+        /// 各 bit |z| 的**最小值**，最弱那个 bit 的显著度
         public let confidence: Double
+        /// |z| < 3 的 bit 数。真实界面上用来判断这次读码能不能信
+        public let weakBits: Int
+        /// 各 bit |z| 的中位数
+        public let medianAbsZ: Double
     }
 
     // MARK: - 编码
@@ -61,8 +66,11 @@ public enum BlockCodec {
     /// - Parameters:
     ///   - payload: 待嵌入的比特，低位在前
     ///   - payloadBits: 有效位数 1...32。同一 payload 在 tile 内重复 `pairsPerTile / payloadBits` 次
-    ///   - alpha: 扰动幅度，即解码端观察到的 |d|。**下限 2**，更低会被色域转换与量化吃掉
-    public static func makeTile(payload: UInt32, payloadBits: Int = 32, alpha: UInt8 = 3) -> RGBAImage {
+    ///   - alpha: 扰动幅度，即解码端观察到的 |d|。**下限 2**，更低会被色域转换与量化吃掉。
+    ///     默认 6 是模拟器实测值：真实界面上块差分的内容噪声 σ≈30，alpha=3 时每 bit 的
+    ///     \|z\| 中位只有 3.3、过半 bit 证据不足；6 时 \|z\| 中位 6.4、全部 bit 显著。
+    ///     代价是平坦区域会有 6/255 ≈ 2.4% 的 8px 棋盘纹理，凑近能看出来。
+    public static func makeTile(payload: UInt32, payloadBits: Int = 32, alpha: UInt8 = 6) -> RGBAImage {
         precondition((1...32).contains(payloadBits), "payloadBits 必须在 1...32")
         var tile = RGBAImage(width: tileSize, height: tileSize)
         for p in 0..<pairsPerTile {
@@ -131,7 +139,9 @@ public enum BlockCodec {
             offsetX: offsetX,
             offsetY: offsetY,
             signal: observation.signal,
-            confidence: observation.confidence
+            confidence: observation.confidence,
+            weakBits: observation.weakBits,
+            medianAbsZ: observation.medianAbsZ
         )
     }
 
@@ -171,14 +181,19 @@ public enum BlockCodec {
             return out
         }
 
-        /// 取各 bit |z| 的**最小值**，不是均值。
-        ///
-        /// 均值会被少数退化 bit 拉高：某些 bit 恰好落在纵向连续的 4 行上取到同一个值，
-        /// 图案纵向退化，错位相位也能让这几个 bit 拿到很高的 z。取最小值则要求**所有** bit
-        /// 都判得出来，错位相位总有 bit 塌掉，正确相位才能胜出。
-        var confidence: Double {
-            let z = scores().filter { $0 != 0 }.map { abs($0) }
-            return z.min() ?? 0
+        var absoluteZScores: [Double] {
+            scores().filter { $0 != 0 }.map { abs($0) }
+        }
+
+        /// 最弱 bit 的显著度。|z| < 3 说明该 bit 的证据不足，不能只信它
+        var confidence: Double { absoluteZScores.min() ?? 0 }
+
+        var weakBits: Int { absoluteZScores.filter { $0 < 3 }.count }
+
+        var medianAbsZ: Double {
+            let z = absoluteZScores.sorted()
+            guard !z.isEmpty else { return 0 }
+            return z[z.count / 2]
         }
     }
 

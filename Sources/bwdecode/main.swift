@@ -68,18 +68,21 @@ guard let result = BlockCodec.decode(
     fail("解码失败: 图像太小", code: 1)
 }
 
-// confidence 是各 bit |z| 的最小值，即最弱那个 bit 的显著度。|z| >= 3 才算每 bit 可靠
+// 判读看「有几个 bit 证据不足」，不看最弱那一个：
+// 真实界面里有文字边缘、与块网格对齐的版式，个别 bit 的 z 天然会塌，全局最小值太苛刻。
+let total = result.payloadBits
+let weak = result.weakBits
 let verdict: String
-if result.confidence >= 3 {
-    verdict = "OK"
-} else if result.confidence >= 1.5 {
-    verdict = "WEAK(画面内容复杂或被压缩，结果可能不可靠)"
+if weak == 0 {
+    verdict = "OK(全部 \(total) bit 显著)"
+} else if weak <= total / 8 {
+    verdict = "WEAK(\(weak)/\(total) bit 证据不足，结论谨慎)"
 } else {
     verdict = "NO(画面中可能没有水印)"
 }
 
 print(String(
-    format: "payload=0x%08X  高16位=0x%04X  低16位=0x%04X  payloadBits=%d  相位=(%d,%d)  signal=%.2f  confidence=%.1f  %@",
+    format: "payload=0x%08X  高16位=0x%04X  低16位=0x%04X  payloadBits=%d  相位=(%d,%d)  signal=%.2f  |z|中位=%.1f  最弱=%.1f  弱bit=%d/%d  %@",
     result.payload,
     (result.payload >> 16) & 0xFFFF,
     result.payload & 0xFFFF,
@@ -87,6 +90,9 @@ print(String(
     result.offsetX,
     result.offsetY,
     result.signal,
+    result.medianAbsZ,
     result.confidence,
+    weak,
+    total,
     verdict
 ))
