@@ -18,6 +18,7 @@ Tests/BlindWatermarkCoreTests/ 单元测试
 Demo/                         iOS 演示 App（xcodegen 生成工程）+ sweep.sh 逐页对比
 skills/blind-watermark/       Agent Skill
 tools/bwdecode.py             Python 版解码器（镜像实现），tools/test_bwdecode.py 自检 + 与 Swift 对账
+*.podspec                     三个 podspec，与 SPM target 一一对应（Core / AutoLoad / UI）
 .github/workflows/ci.yml      PR check：build + test + Demo 编译 + Python 解码器对账
 ```
 

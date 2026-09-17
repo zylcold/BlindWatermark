@@ -98,11 +98,20 @@ Watermark.install(payload: 0xDEAD_BEEF)
 
 ### CocoaPods
 
+CocoaPods 下三个 target 拆成三个 pod（模块名与 SPM 一致），**必须一起声明**：
+`BlindWatermark` 通过 `s.dependency` 依赖另外两个，只写它会在 `import BlindWatermarkCore` 处挂掉。
+
 ```ruby
-pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
-# 或指向 git
-# pod 'BlindWatermark', :git => 'git@github.com:zylcold/BlindWatermark.git'
+pod 'BlindWatermarkCore',     :path => '/path/to/BlindWatermark'
+pod 'BlindWatermarkAutoLoad', :path => '/path/to/BlindWatermark'
+pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
+
+# 换成 git 源需要仓库有对应 tag（当前未打 tag，`~> 0.1.0` 会解析失败）：
+# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '0.1.0'
 ```
+
+注意 podspec 声明 `ios.deployment_target = '13.0'`（仓库平台下限）。Xcode 27 起最低只支持 15.0，
+用它建 pod 工程需要把 pod target 的部署目标抬到 15.0，或改用较老的 Xcode。
 
 ### 接入注意
 

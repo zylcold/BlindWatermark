@@ -112,11 +112,23 @@ so it runs out of the box.
 
 ### CocoaPods
 
+Under CocoaPods the three targets ship as three pods (module names match SwiftPM), and **all three
+must be declared**: `BlindWatermark` depends on the other two via `s.dependency`, so declaring only
+it breaks at `import BlindWatermarkCore`.
+
 ```ruby
-pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
-# or point at git
-# pod 'BlindWatermark', :git => 'git@github.com:zylcold/BlindWatermark.git'
+pod 'BlindWatermarkCore',     :path => '/path/to/BlindWatermark'
+pod 'BlindWatermarkAutoLoad', :path => '/path/to/BlindWatermark'
+pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
+
+# Switching to a git source needs a matching tag in the repo (none exist yet, so `~> 0.1.0`
+# will fail to resolve):
+# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '0.1.0'
 ```
+
+Note the podspecs declare `ios.deployment_target = '13.0'` (the repo's platform floor). Xcode 27
+only supports 15.0 and above, so building a pod project with it needs the pod targets bumped to
+15.0, or an older Xcode.
 
 ### Things to watch
 
