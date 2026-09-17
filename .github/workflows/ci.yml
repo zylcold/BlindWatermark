@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: swift build + test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test
+
+  demo:
+    name: Demo 编译（iOS）
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Demo project
+        working-directory: Demo
+        run: xcodegen generate
+      # generic/platform 不挑具体模拟器、不用开机，只验证 iOS 侧能编译
+      # （UIKit 窗口层 + ObjC +load 在 macOS 上编不到，SwiftPM 那步覆盖不了）
+      - name: Build Demo for iOS Simulator
+        working-directory: Demo
+        run: |
+          xcodebuild -project Demo.xcodeproj -scheme Demo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath /tmp/bwdd \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  python:
+    name: Python 解码器对账
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install numpy + Pillow
+        run: |
+          # Homebrew 的 python 是 externally-managed，需要 --break-system-packages；老 pip 不认这个旗标
+          python3 -m pip install numpy pillow \
+            || python3 -m pip install --break-system-packages numpy pillow
+      # 对账脚本会调 Swift 版 bwdecode 在同一张 PNG 上比对，所以要 release 构建
+      - name: Build swift CLI
+        run: swift build -c release
+      - name: Self-check + cross-check
+        run: python3 tools/test_bwdecode.py
