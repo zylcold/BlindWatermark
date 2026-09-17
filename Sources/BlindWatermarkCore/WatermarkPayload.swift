@@ -32,6 +32,8 @@ public struct WatermarkPayload: Equatable {
     public static let macByteCount = 12
     /// mac 覆盖的字节数（uid + timestamp + pageCode + tag）
     static let signedByteCount = 20
+    /// 结构自检认定的合理时间戳区间：2015-01-01 ... 2100-01-01
+    static let plausibleTimestampRange: ClosedRange<UInt32> = 1_420_070_400...4_102_444_800
 
     public var uid: UInt32
     public var timestamp: UInt32
@@ -137,6 +139,96 @@ public struct WatermarkPayload: Equatable {
         var diff: UInt8 = 0
         for i in 0..<expected.count { diff |= mac[i] ^ expected[i] }
         return diff == 0
+    }
+
+    // MARK: - 校验值
+
+    /// `mac` 字段里装的是哪种校验值。
+    public enum Verification: Equatable {
+        /// HMAC 验签通过（需要密钥）
+        case signed
+        /// 公开自检值通过：能证明"解对了"，**不能**证明"没被伪造"
+        case selfChecked
+        /// mac 全 0：载荷没带任何校验值
+        case unsigned
+        /// 带了校验值但两种都对不上
+        case failed
+    }
+
+    /// `mac` 是否为全 0（没带校验值）。历史载荷和 `mac: []` 的客户端都走这一支。
+    public var isUnsigned: Bool { mac.allSatisfy { $0 == 0 } }
+
+    /// 判定载荷带的是哪种校验值。
+    ///
+    /// 顺序：全 0 → `.unsigned`；有密钥且 HMAC 通过 → `.signed`；mac 等于公开自检值 → `.selfChecked`；
+    /// 都不行 → `.failed`。没给密钥时签名载荷（HMAC）落在 `.failed`，调用方应报"未校验(需要 --key)"
+    /// 而不是"被篡改"。
+    public func verification(key: SymmetricKey?) -> Verification {
+        guard !isUnsigned else { return .unsigned }
+        if let key, isValid(key: key) { return .signed }
+        if mac.count == WatermarkPayload.macByteCount,
+           Array(mac.prefix(WatermarkPayload.macByteCount))
+            == WatermarkPayload.selfCheck(uid: uid, timestamp: timestamp, pageCode: pageCode, tag: tag) {
+            return .selfChecked
+        }
+        return .failed
+    }
+
+    /// 结构自检：只用布局本身的结构约束，不需要密钥，也不依赖任何额外字段。
+    ///
+    /// 校验 layout 版本、tag 保留位、pageCode 未用的高位、短码字符是否落在 37 符号表内、
+    /// 时间戳是否落在合理区间。名义判别力 ≈ 28 bit，**实测仍会放过近似解**
+    /// （半块相位错位解出的是真载荷改几个 bit 的拷贝，结构字段根本没动）——
+    /// 所以它只是"没有任何校验值时的兵底"，不能替代校验值，调用方必须如实报未校验。
+    public var isPlausible: Bool {
+        guard layoutVersion == WatermarkPayload.layoutVersion,
+              tag & 0x0FFF == 0,
+              pageCode >> 60 == 0,
+              WatermarkPayload.plausibleTimestampRange.contains(timestamp) else { return false }
+        let alphabetSize = UInt64(PageNameCodec.alphabet.count)
+        for position in 0..<PageNameCodec.codeLength where (pageCode >> (6 * UInt64(position))) & 0x3F >= alphabetSize {
+            return false
+        }
+        return true
+    }
+
+    /// 公开自检值：`SHA-256(前 20 字节)` 截断到 96 bit，与 mac 同位。
+    ///
+    /// 无密钥部署（或客户端自己拼载荷）用它代替 HMAC：任何一位不同都过不了，
+    /// 所以能拦住"对齐错了几个 bit"的近似解 —— 实测在 64 相位 × 512 tile 平移的全搜索空间里假阳性为 0，
+    /// 而固定 magic 同类方案会放过 4 个（Hamming 距离 4~5 bit）。
+    public static func selfCheck(uid: UInt32, timestamp: UInt32, pageCode: UInt64, tag: UInt32) -> [UInt8] {
+        let body = signedBody(uid: uid, timestamp: timestamp, pageCode: pageCode, tag: tag)
+        return Array(SHA256.hash(data: Data(body)).prefix(macByteCount))
+    }
+
+    /// 构造带公开自检值的载荷（无密钥场景）。
+    public static func selfChecked(uid: UInt32, timestamp: UInt32, pageCode: UInt64, tag: UInt32) -> WatermarkPayload {
+        WatermarkPayload(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: pageCode,
+            tag: tag,
+            mac: selfCheck(uid: uid, timestamp: timestamp, pageCode: pageCode, tag: tag)
+        )
+    }
+
+    /// 从类名构造带公开自检值的载荷（无密钥场景）。
+    public static func selfChecked(
+        uid: UInt32,
+        timestamp: UInt32,
+        pageClassName: String,
+        app: UInt32 = 0,
+        environment: UInt32 = 0
+    ) -> WatermarkPayload {
+        selfChecked(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: PageNameCodec.encode(PageNameCodec.code(for: pageClassName)),
+            tag: (WatermarkPayload.layoutVersion << 28)
+                | ((app & 0xFF) << 20)
+                | ((environment & 0xFF) << 12)
+        )
     }
 
     /// 前 20 字节的 HMAC-SHA256 截断到 96 bit。

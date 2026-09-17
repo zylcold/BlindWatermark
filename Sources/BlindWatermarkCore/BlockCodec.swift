@@ -198,6 +198,7 @@ public enum BlockCodec {
         in image: RGBAImage,
         payloadBits: Int = WatermarkPayload.payloadBits,
         plane: WatermarkPlane = .chroma,
+        searchPairOffset: Bool = false,
         validate: ((Decoded) -> Bool)? = nil
     ) -> (offsetX: Int, offsetY: Int) {
         precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
@@ -207,8 +208,9 @@ public enum BlockCodec {
         var bestScore = -Double.infinity
         var validated: (offset: (offsetX: Int, offsetY: Int), score: Double)?
 
+        // `searchPairOffset` 多搜一档 block 偏移（见 `decodeBest` 的说明）。
         for oy in 0..<blockSize {
-            for ox in 0..<blockSize {
+            for ox in 0..<(searchPairOffset ? blockSize * 2 : blockSize) {
                 let stats = accumulate(feature, image, ox: ox, oy: oy)
                 let folded = fold(stats, payloadBits: payloadBits)
                 if folded.medianAbsZ > bestScore {
@@ -256,18 +258,25 @@ public enum BlockCodec {
     ///
     /// 裁剪过的截图（相位未知）、不确定编码端用的平面或位数时用这个。
     ///
-    /// 裁决规则：**先看 `validate`**（通常是 `WatermarkPayload.isValid(key:)` 的 MAC 校验），
+    /// 裁决规则：**先看 `validate`**（通常是 HMAC 或公开自检值校验），
     /// 通过校验的候选里取 `medianAbsZ` 最高的；一个都没有才退回未通过校验里 `medianAbsZ` 最高的。
-    /// 裸穷举不可信 —— 错位相位在低变化画面上也能让所有 bit 自洽，必须靠 MAC 兜底。
+    /// 裸穷举不可信 —— 错位相位在低变化画面上也能让所有 bit 自洽，必须靠校验值兜底。
+    ///
+    /// `searchPairOffset` 多搜一档 block 偏移（ox 取 0..<16 而不是 0..<8），
+    /// 用来救"裁剪量是奇数个块"的情况：pair 是两个相邻块，块网格错开一个块时
+    /// 解码端配的是跨两个 pattern pair 的块对，读出来是相邻两个 bit 的和
+    /// （只有两位相同时才留下观测），观测稀疏到部分 bit 一个证据都没有。
+    /// 多搜一档后这些位重新变成完整观测 —— 默认不开是因为它把相位穷举翻一倍。
     ///
     /// 开销：特征图与积分图每平面只算一次（这是大头），相位穷举只重复廉价的累加，
-    /// 位数换读复用同一份按 pair 累积的统计，实测 64 相位 × 2 平面 × 2 位数在 1 秒以内。
+    /// 位数换读复用同一份按 pair 累积的统计。
     public static func decodeBest(
         _ image: RGBAImage,
         payloadBitsCandidates: [Int] = [WatermarkPayload.payloadBits, 32],
         planes: [WatermarkPlane] = [.chroma, .luma],
         searchPhase: Bool = true,
         searchTile: Bool = true,
+        searchPairOffset: Bool = false,
         validate: ((Decoded) -> Bool)? = nil
     ) -> Decoded? {
         let bitsList = payloadBitsCandidates.filter { (1...maxPayloadBits).contains($0) }
@@ -288,8 +297,9 @@ public enum BlockCodec {
         var scored: [(context: Context, score: Double)] = []
         for plane in planes {
             guard let feature = featureAndIntegral(image, plane) else { continue }
+            let columnCount = searchPairOffset ? blockSize * 2 : blockSize
             let phases: [(Int, Int)] = searchPhase
-                ? (0..<(blockSize * blockSize)).map { ($0 % blockSize, $0 / blockSize) }
+                ? (0..<(columnCount * blockSize)).map { ($0 % columnCount, $0 / columnCount) }
                 : [(0, 0)]
             for (ox, oy) in phases {
                 let stats = accumulate(feature, image, ox: ox, oy: oy)

@@ -8,19 +8,19 @@ import BlindWatermarkCore
 //                 [--layout] [--key <hex>] [--pages <json>] [--auto]
 //   --bits    payload 有效位数，默认 256（推荐布局），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
-//   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位。
-//             只有给了 --key 才额外穷举 tile 平移（rotation），用 MAC 裁决；
-//             没给 --key 时只搜块网格相位、rotation 恒 0，只能按 |z| 中位选（置信度不可保证），
-//             非整 tile 倍数的裁剪解不了。
+//   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位与 tile 平移（rotation）。
+//             裁剪自愈靠校验值裁决：有 --key 验 HMAC，没 --key 就验载荷自带的公开自检值。
+//             两者都没有（mac 全 0）时退化为结构自检，**不保证解出正确载荷**，会打警告。
 //             与 --offset 互斥；与 --auto 语义重叠，别一起用
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
 //   --layout  按 256 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
 //   --key     服务端密钥（hex），配合 --layout 校验 mac
 //   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
 //   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
-//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × tile 旋转，
+//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × 512 tile 平移，
 //             位数默认只有 256，只有显式给了 --bits 且 ≠256 才追加那一种；
-//             给了 --key 用 MAC 裁决，没给就退回 medianAbsZ（不如 MAC 可靠）
+//             同样靠校验值裁决（密钥 → HMAC，无密钥 → 公开自检值）；
+//             都没有则退结构自检并警告 —— 近似解会漏网，必须看弱 bit
 
 func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -31,13 +31,77 @@ func warn(_ message: String) {
     FileHandle.standardError.write(("警告: " + message + "\n").data(using: .utf8)!)
 }
 
-/// MAC 裁决器：只对推荐布局有意义，位数不符时一律返回 false（宁可让它退回未校验结果，也不要假装验证过）。
-func macValidator(_ key: SymmetricKey) -> (BlockCodec.Decoded) -> Bool {
+/// 载荷里的字段（只对推荐布局有意义；位数不符一律 nil）。
+func fields(of decoded: BlockCodec.Decoded) -> WatermarkPayload? {
+    guard decoded.payloadBits == WatermarkPayload.payloadBits else { return nil }
+    return WatermarkPayload(bytes: decoded.payloadBytes)
+}
+
+/// 严格校验器：验签通过（有密钥）或公开自检值通过（未验签但能证明"解对了"）。
+/// 位数不符时一律 false —— 宁可退回未校验结果，也不要假装验证过。
+func validValidator(_ key: SymmetricKey?) -> (BlockCodec.Decoded) -> Bool {
     { decoded in
-        guard decoded.payloadBits == WatermarkPayload.payloadBits,
-              let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
-        return fields.isValid(key: key)
+        guard let payload = fields(of: decoded) else { return false }
+        switch payload.verification(key: key) {
+        case .signed, .selfChecked: return true
+        case .unsigned, .failed: return false
+        }
     }
+}
+
+/// 兜底校验器：结构自检（不需要密钥、不依赖额外字段）。
+/// **只减少错误，不消除错误** —— 半块相位错位解出的近似解结构字段根本没动，照样能过。
+func structuralValidator(_ decoded: BlockCodec.Decoded) -> Bool {
+    fields(of: decoded)?.isPlausible ?? false
+}
+
+/// 三档阶梯搜索：
+/// 1. 严格校验器 + 常规相位（快）
+/// 2. 严格校验器 + block 奇偶档（救"裁剪量是奇数个块"的横向裁剪）
+/// 3. 结构自检兜底（载荷没带校验值时唯一能做到的，必须打警告）
+///
+/// 返回最终结果与它落在哪一档校验上。
+func decodeLadder(
+    _ image: RGBAImage,
+    payloadBitsCandidates: [Int],
+    planes: [WatermarkPlane],
+    key: SymmetricKey?
+) -> (result: BlockCodec.Decoded?, tier: WatermarkPayload.Verification?) {
+    let strict = validValidator(key)
+    for pairOffset in [false, true] {
+        let candidate = BlockCodec.decodeBest(
+            image,
+            payloadBitsCandidates: payloadBitsCandidates,
+            planes: planes,
+            searchPhase: true,
+            searchTile: true,
+            searchPairOffset: pairOffset,
+            validate: strict
+        )
+        if let tier = candidate.flatMap({ verificationTier($0, key: key) }), tier == .signed || tier == .selfChecked {
+            return (candidate, tier)
+        }
+    }
+    warn(noValidatorWarning)
+    let fallback = BlockCodec.decodeBest(
+        image,
+        payloadBitsCandidates: payloadBitsCandidates,
+        planes: planes,
+        searchPhase: true,
+        searchTile: true,
+        validate: structuralValidator
+    )
+    return (fallback, fallback.flatMap { verificationTier($0, key: key) })
+}
+
+/// 载荷既没带 HMAC（或没有密钥）、也没带公开自检值时打给调用方看的警告。
+let noValidatorWarning = "载荷没带可校验的校验值（mac 全 0 或仅有 HMAC 而没给 --key）："
+    + "裁剪 / 相位搜索已退化为结构自检，近似解会漏网 —— 结论不保证正确，必须看 弱bit 与 校验 字段；"
+    + "接入端填公开自检值（WatermarkPayload.selfChecked）或服务端 HMAC 才能真正保证"
+
+/// 解码结果落在哪一档校验上，用来决定输出措辞。
+func verificationTier(_ decoded: BlockCodec.Decoded, key: SymmetricKey?) -> WatermarkPayload.Verification? {
+    fields(of: decoded)?.verification(key: key)
 }
 
 var path: String?
@@ -145,53 +209,23 @@ else {
 }
 
 let result: BlockCodec.Decoded?
+/// 结果最终落在哪一档校验上（决定输出措辞）。nil = 不是推荐布局，无法解读字段。
+var tier: WatermarkPayload.Verification?
 if auto {
-    let validator: ((BlockCodec.Decoded) -> Bool)?
-    if let key {
-        validator = macValidator(key)
-    } else {
-        // 没有 MAC 可用时用时间戳合理性做弱校验：Unix 秒落在 2015...2100 之间
-        validator = { decoded in
-            guard decoded.payloadBits == WatermarkPayload.payloadBits,
-                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
-            return (1_420_070_400...4_102_444_800).contains(fields.timestamp)
-        }
-    }
     var payloadBitsCandidates = [WatermarkPayload.payloadBits]
     if payloadBits != WatermarkPayload.payloadBits {
         payloadBitsCandidates.append(payloadBits)
     }
-    result = BlockCodec.decodeBest(
-        image,
-        payloadBitsCandidates: payloadBitsCandidates,
-        planes: [.chroma, .luma],
-        searchPhase: true,
-        validate: validator
-    )
+    (result, tier) = decodeLadder(image, payloadBitsCandidates: payloadBitsCandidates, planes: [.chroma, .luma], key: key)
 } else {
     if autoOffset {
-        // 相位与 tile 平移都不确定：块网格相位靠 medianAbsZ 排序，tile 平移只能靠校验器裁决
-        // （错位 / 错旋转同样能给出很干净的自洽载荷，裸穷举不叫搜索，叫猜）。
-        var phaseValidator: ((BlockCodec.Decoded) -> Bool)?
-        if let key {
-            phaseValidator = macValidator(key)
-            if payloadBits != WatermarkPayload.payloadBits {
-                warn("MAC 只覆盖 \(WatermarkPayload.payloadBits) bit 推荐布局，--bits \(payloadBits) 下相位无法校验")
-            }
-        } else {
-            phaseValidator = nil
-            warn("--auto-offset 没给 --key：只搜块网格相位，tile 旋转不搜（等价 rotation 恒 0），"
-                + "只能按 |z| 中位裁决，不保证解出正确载荷；非整 tile 倍数的裁剪（平移）解不了。"
-                + "要覆盖裁剪平移必须给 --key。判读请看 弱bit，配合 --layout 检查字段是否合理")
+        // 相位与 tile 平移都不确定：块网格相位靠 medianAbsZ 排序，平移只能靠校验值裁决
+        // （错位平移同样能给出很干净的自洽载荷，裸穷举不叫搜索，叫猜）。
+        if payloadBits != WatermarkPayload.payloadBits {
+            warn("HMAC 与公开自检值都只覆盖 \(WatermarkPayload.payloadBits) bit 推荐布局，"
+                + "--bits \(payloadBits) 下相位与平移无法校验")
         }
-        result = BlockCodec.decodeBest(
-            image,
-            payloadBitsCandidates: [payloadBits],
-            planes: [plane],
-            searchPhase: true,
-            searchTile: true,
-            validate: phaseValidator
-        )
+        (result, tier) = decodeLadder(image, payloadBitsCandidates: [payloadBits], planes: [plane], key: key)
     } else {
         result = BlockCodec.decode(
             image,
@@ -200,6 +234,7 @@ if auto {
             offsetY: offsetY,
             plane: plane
         )
+        tier = result.flatMap { verificationTier($0, key: key) }
     }
 }
 guard let result else {
@@ -239,26 +274,35 @@ print(String(
 // 推荐布局的字段解读
 if showLayout {
     guard result.payloadBits == WatermarkPayload.payloadBits,
-          let fields = WatermarkPayload(bytes: result.payloadBytes) else {
+          let payload = WatermarkPayload(bytes: result.payloadBytes) else {
         fail("--layout 需要 --bits \(WatermarkPayload.payloadBits) 且载荷为 \(WatermarkPayload.byteCount) 字节", code: 2)
     }
-    let date = Date(timeIntervalSince1970: TimeInterval(fields.timestamp))
+    let date = Date(timeIntervalSince1970: TimeInterval(payload.timestamp))
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
     formatter.timeZone = TimeZone(identifier: "UTC")
+    // 校验分档必须如实写：自检值通过只证明"解对了"，不证明"没被伪造"。
     let macLine: String
-    if let key {
-        macLine = fields.isValid(key: key) ? "mac=OK" : "mac=BAD(密钥不符或被篡改)"
-    } else {
-        macLine = "mac=未校验(需要 --key)"
+    switch payload.verification(key: key) {
+    case .signed:
+        macLine = "mac=OK(验签)"
+    case .selfChecked:
+        macLine = "mac=OK(自检,未验签)"
+    case .unsigned:
+        macLine = payload.isPlausible
+            ? "mac=未签名(字段自洽,退结构自检)"
+            : "mac=未签名(字段不自洽,谨慎)"
+    case .failed:
+        // 没给密钥时无法区分"服务端 HMAC"与"真的坏了"，按未校验报，不吓人
+        macLine = key == nil ? "mac=未校验(需要 --key)" : "mac=BAD(密钥不符或载荷被改)"
     }
     // 新旧布局的 mac 覆盖范围相同（都是前 12 字节），所以旧截图 mac 照样通过，
     // 但 page/tag 字段边界变了 —— 靠 layout 版本位显式提示，别让 agent 误读。
-    if fields.layoutVersion != WatermarkPayload.layoutVersion {
-        print("注意: 这张截图是 layout=v\(fields.layoutVersion)，当前布局是 v\(WatermarkPayload.layoutVersion)，"
+    if payload.layoutVersion != WatermarkPayload.layoutVersion {
+        print("注意: 这张截图是 layout=v\(payload.layoutVersion)，当前布局是 v\(WatermarkPayload.layoutVersion)，"
             + "page/tag 字段边界不同，下面的解读可能是错的")
     }
-    let code = fields.pageNameCode
+    let code = payload.pageNameCode
     let pageLine: String
     if let pages {
         let hits = pages.matches(code: code)
@@ -275,13 +319,16 @@ if showLayout {
     }
     print(String(
         format: "uid=%u(0x%08X)  time=%@  %@  layout=v%u app=%u env=%u  %@",
-        fields.uid,
-        fields.uid,
+        payload.uid,
+        payload.uid,
         formatter.string(from: date),
         pageLine,
-        fields.layoutVersion,
-        fields.app,
-        fields.environment,
+        payload.layoutVersion,
+        payload.app,
+        payload.environment,
         macLine
     ))
+} else if let payload = fields(of: result), payload.isUnsigned {
+    // 没开 --layout 也要提醒：无校验值的载荷在裁剪场景下不可信
+    warn(noValidatorWarning)
 }

@@ -195,16 +195,16 @@ final class WatermarkState {
     }
 }
 
-/// 默认 payload：uid 位填设备哈希，时间戳填当前 Unix 秒，页面/标签留 0，mac 留 0。
-/// ponytail: 无签名可被伪造。上生产换成服务端下发的 WatermarkPayload。
+/// 默认 payload：uid 位填设备哈希，时间戳填当前 Unix 秒，页面/标签留 0，mac 填**公开自检值**。
+///
+/// ponytail: 自检值能拦"解错了"，但拦不住伪造（谁都能算）—— 上生产换成服务端下发并验签的 payload。
 enum WatermarkDefaultPayload {
     static func currentBytes() -> [UInt8] {
-        WatermarkPayload(
+        WatermarkPayload.selfChecked(
             uid: deviceHash(),
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
             pageCode: 0,
-            tag: WatermarkPayload.layoutVersion << 28,
-            mac: []
+            tag: WatermarkPayload.layoutVersion << 28
         ).bytes
     }
 

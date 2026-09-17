@@ -364,6 +364,46 @@ final class WatermarkPayloadTests: XCTestCase {
         XCTAssertNotEqual(a.mac, b.mac)
     }
 
+    // MARK: - 公开自检值（无密钥部署）
+
+    /// 自检载荷：没有密钥也能完成校验，但必须报成"未验签"
+    func testSelfCheckValidatesWithoutKey() throws {
+        let payload = WatermarkPayload.selfChecked(
+            uid: 0x1234_5678,
+            timestamp: 1_760_000_000,
+            pageClassName: "BHProfileViewController",
+            app: 1
+        )
+        XCTAssertEqual(payload.verification(key: nil), .selfChecked)
+        XCTAssertEqual(payload.verification(key: try makeKey()), .selfChecked, "自检值不是 HMAC，换任何密钥都不该变成验签")
+        XCTAssertFalse(payload.isValid(key: try makeKey()), "自检载荷不能冒充验签通过")
+        XCTAssertTrue(payload.isPlausible)
+    }
+
+    /// `mac: []` 这种客户端自拼的载荷：必须报未签名，不能报 BAD（旧版会误报"密钥不符或被篡改"）
+    func testUnsignedPayloadIsReportedAsUnsigned() throws {
+        let payload = WatermarkPayload(uid: 7, timestamp: 1_760_000_000, pageCode: 3, tag: WatermarkPayload.layoutVersion << 28, mac: [])
+        XCTAssertTrue(payload.isUnsigned)
+        XCTAssertEqual(payload.verification(key: nil), .unsigned)
+        XCTAssertEqual(payload.verification(key: try makeKey()), .unsigned)
+        XCTAssertTrue(payload.isPlausible, "推荐布局下字段是自洽的")
+    }
+
+    /// 近似解（半块相位错位解出的那种东西）：自检值能拦，结构自检拦不住。
+    /// 钉死这个差异 —— 它是 A 方案存在的全部理由，也是"结构自检只能当兵底"的依据。
+    func testNearCopyAliasIsCaughtBySelfCheckOnly() throws {
+        let payload = WatermarkPayload.selfChecked(
+            uid: 0x1234_5678,
+            timestamp: 1_760_000_000,
+            pageClassName: "BHTextListViewController",
+            app: 1
+        )
+        var alias = payload
+        alias.uid ^= 0x0F  // 改 4 个 bit，结构字段一个不动
+        XCTAssertEqual(alias.verification(key: nil), .failed, "自检值必须拦住近似解")
+        XCTAssertTrue(alias.isPlausible, "结构自检看不出这个近似解")
+    }
+
     /// 256 bit 载荷在推荐参数下的编解码回环：字段必须逐字节还原
     func test256BitRoundTripOnRealisticContent() throws {
         let payload = WatermarkPayload(
@@ -623,6 +663,79 @@ final class AutoDecodeTests: XCTestCase {
                 }
             ), "left=\(left) 应能靠 tile 平移搜出来")
             XCTAssertEqual(decoded.payloadBytes, payload.bytes, "left=\(left) 解出的载荷不对")
+        }
+    }
+
+    /// 无密钥 + 裁剪：载荷只要带了公开自检值，就不需要密钥也能完成裁剪自愈。
+    /// 旧的"无 key 只能按 |z| 中位猜"在这批用例上实测 0/20 正确 —— 钉住新行为。
+    func testAutoSurvivesCropWithoutKeyWhenSelfChecked() throws {
+        let payload = WatermarkPayload.selfChecked(
+            uid: 0x1234_5678,
+            timestamp: 1_760_000_000,
+            pageClassName: "BHTextListViewController",
+            app: 1
+        )
+        let full = shot(payload: payload.bytes, plane: .chroma, offset: (0, 0))
+        // 严格校验器：验签或自检值通过。跟 CLI 里的 validValidator 同语义
+        let validate: (BlockCodec.Decoded) -> Bool = { decoded in
+            guard decoded.payloadBits == WatermarkPayload.payloadBits,
+                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+            switch fields.verification(key: nil) {
+            case .signed, .selfChecked: return true
+            case .unsigned, .failed: return false
+            }
+        }
+        for (left, top) in [(0, 137), (0, 400), (8, 0), (16, 0), (24, 0), (40, 0), (16, 400)] {
+            let decoded = try XCTUnwrap(BlockCodec.decodeBest(
+                crop(full, top: top, left: left),
+                planes: [.chroma],
+                searchPhase: true,
+                searchTile: true,
+                validate: validate
+            ), "left=\(left) top=\(top) 应能靠自检值解出来")
+            XCTAssertEqual(decoded.payloadBytes, payload.bytes, "left=\(left) top=\(top) 解出的载荷不对")
+        }
+    }
+
+    /// 横向裁剪量是**奇数个块**时，解码端默认配的是跨两个 pattern pair 的块对，
+    /// 读出来是相邻两 bit 的和（只有两位相同时才留下观测）—— 信号弱一截。
+    /// 多搜一档 block 奇偶（`searchPairOffset`）后重新读到真正的 pair，|z| 回到和偶数块裁剪一样。
+    /// 真实截图（文字页裁 40px）上卡的就是这条：实测带上奇偶档后 20/20 个裁剪用例全对。
+    func testPairOffsetRecoversOddBlockCrops() throws {
+        let payload = WatermarkPayload.selfChecked(
+            uid: 0x1234_5678,
+            timestamp: 1_760_000_000,
+            pageClassName: "BHTextListViewController",
+            app: 1
+        )
+        let full = shot(payload: payload.bytes, plane: .chroma, offset: (0, 0))
+        let validate: (BlockCodec.Decoded) -> Bool = { decoded in
+            guard decoded.payloadBits == WatermarkPayload.payloadBits,
+                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+            switch fields.verification(key: nil) {
+            case .signed, .selfChecked: return true
+            case .unsigned, .failed: return false
+            }
+        }
+
+        // 偶数块裁剪（16px）作为基准：这是"配对了"的 |z|
+        let aligned = try XCTUnwrap(BlockCodec.decodeBest(
+            crop(full, top: 0, left: 16), planes: [.chroma], searchPhase: true, validate: validate
+        ))
+
+        for left in [8, 24, 40] {  // 奇数个块 = 半对错位
+            let plain = try XCTUnwrap(BlockCodec.decodeBest(
+                crop(full, top: 0, left: left), planes: [.chroma], searchPhase: true, validate: validate
+            ))
+            let parity = try XCTUnwrap(BlockCodec.decodeBest(
+                crop(full, top: 0, left: left), planes: [.chroma], searchPhase: true,
+                searchPairOffset: true, validate: validate
+            ))
+            XCTAssertEqual(plain.payloadBytes, payload.bytes, "left=\(left) 常规搜索也要能解对")
+            XCTAssertEqual(parity.payloadBytes, payload.bytes, "left=\(left) 奇偶档解出的载荷不对")
+            XCTAssertGreaterThan(parity.medianAbsZ, plain.medianAbsZ, "left=\(left) 奇偶档应读到真正的 pair")
+            XCTAssertEqual(parity.medianAbsZ, aligned.medianAbsZ, accuracy: 0.1,
+                           "left=\(left) 奇偶档的 |z| 应与偶数块裁剪持平")
         }
     }
 

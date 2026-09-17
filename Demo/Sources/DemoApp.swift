@@ -41,10 +41,20 @@ enum DemoWatermark {
     }
 
     private static func payload(page: DemoPage) -> [UInt8] {
+        let timestamp = UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max))))
+        // `BW_SELFCHECK=1` 模拟"无密钥部署"：mac 位置放公开自检值。解码端没有密钥也能完成裁剪自愈。
+        if ProcessInfo.processInfo.environment["BW_SELFCHECK"] == "1" {
+            return WatermarkPayload.selfChecked(
+                uid: demoUID,
+                timestamp: timestamp,
+                pageClassName: page.className,
+                app: demoTag
+            ).bytes
+        }
         guard let key = SymmetricKey(hex: keyHex) else { fatalError("demo key 不合法") }
         return WatermarkPayload(
             uid: demoUID,
-            timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
+            timestamp: timestamp,
             pageClassName: page.className,
             app: demoTag,
             key: key
