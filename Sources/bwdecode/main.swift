@@ -4,12 +4,13 @@ import Foundation
 import ImageIO
 import BlindWatermarkCore
 
-// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma] [--layout] [--key <hex>]
-//   --bits    payload 有效位数，默认 128（推荐布局），必须与打水印端一致
-//   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
-//   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
-//   --layout  按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
-//   --key     服务端密钥（hex），配合 --layout 校验 mac
+// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>]
+//   --bits        payload 有效位数，默认 128（推荐布局），必须与打水印端一致
+//   --offset      图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
+//   --auto-offset 自动搜索最优相位，穷举 blockSize×blockSize 种偏移取 |z| 中位最大的一组
+//   --plane       水印压在哪一平面，默认 chroma，必须与打水印端一致
+//   --layout      按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
+//   --key         服务端密钥（hex），配合 --layout 校验 mac
 
 func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -20,6 +21,7 @@ var path: String?
 var payloadBits = WatermarkPayload.payloadBits
 var offsetX = 0
 var offsetY = 0
+var autoOffset = false
 var plane: WatermarkPlane = .chroma
 var showLayout = false
 var key: SymmetricKey?
@@ -44,6 +46,8 @@ while index < arguments.count {
         }
         offsetX = x
         offsetY = y
+    case "--auto-offset":
+        autoOffset = true
     case "--plane":
         index += 1
         guard index < arguments.count, let value = WatermarkPlane(rawValue: arguments[index]) else {
@@ -69,7 +73,7 @@ while index < arguments.count {
 }
 
 guard let path else {
-    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--plane luma|chroma] [--layout] [--key <hex>]", code: 2)
+    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>]", code: 2)
 }
 
 let url = URL(fileURLWithPath: path)
@@ -79,6 +83,12 @@ guard
     let image = RGBAImage(cgImage: cgImage)
 else {
     fail("读不到图片: \(path)", code: 1)
+}
+
+if autoOffset {
+    let best = BlockCodec.findBestOffset(in: image, payloadBits: payloadBits, plane: plane)
+    offsetX = best.offsetX
+    offsetY = best.offsetY
 }
 
 guard let result = BlockCodec.decode(
@@ -131,6 +141,7 @@ if showLayout {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
     formatter.timeZone = TimeZone(identifier: "UTC")
+    let magicLine = fields.hasMagic ? "magic=OK" : "magic=BAD(payloadBits 可能与编码端不一致)"
     let macLine: String
     if let key {
         macLine = fields.isValid(key: key) ? "mac=OK" : "mac=BAD(密钥不符或被篡改)"
@@ -138,13 +149,14 @@ if showLayout {
         macLine = "mac=未校验(需要 --key)"
     }
     print(String(
-        format: "uid=%u(0x%08X)  time=%@  pageIndex=%u  tag=%u(0x%04X)  %@",
+        format: "uid=%u(0x%08X)  time=%@  pageIndex=%u  appTag=%u(0x%03X)  %@  %@",
         fields.uid,
         fields.uid,
         formatter.string(from: date),
         fields.pageIndex,
-        fields.tag,
-        fields.tag,
+        fields.appTag,
+        fields.appTag,
+        magicLine,
         macLine
     ))
     print("pageIndex 需查接入端的页面注册表才能还原类名")

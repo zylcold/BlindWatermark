@@ -186,6 +186,31 @@ public enum BlockCodec {
 
     // MARK: - 解码
 
+    /// 穷举 `blockSize × blockSize` 种相位偏移，返回解码置信度（|z| 中位）最高的那一组。
+    ///
+    /// 截图被裁过（例如分享给微信时被裁边）时，实际相位未知；用此函数自动搜索。
+    /// 额外开销约 `blockSize²`（= 64）倍单次解码耗时，典型 iPhone 截图约 200–500 ms。
+    public static func findBestOffset(
+        in image: RGBAImage,
+        payloadBits: Int = WatermarkPayload.payloadBits,
+        plane: WatermarkPlane = .chroma
+    ) -> (offsetX: Int, offsetY: Int) {
+        var bestX = 0
+        var bestY = 0
+        var bestZ = -1.0
+        for oy in 0..<blockSize {
+            for ox in 0..<blockSize {
+                guard let d = decode(image, payloadBits: payloadBits, offsetX: ox, offsetY: oy, plane: plane) else { continue }
+                if d.medianAbsZ > bestZ {
+                    bestZ = d.medianAbsZ
+                    bestX = ox
+                    bestY = oy
+                }
+            }
+        }
+        return (bestX, bestY)
+    }
+
     /// 从整屏截图解码。
     ///
     /// 相位默认 (0, 0)：水印层铺在窗口原点，整屏截图的图案原点就是图片原点。

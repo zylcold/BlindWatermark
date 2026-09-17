@@ -381,4 +381,47 @@ final class WatermarkPayloadTests: XCTestCase {
         XCTAssertEqual(restored.tag, payload.tag)
         XCTAssertEqual(restored.mac, payload.mac)
     }
+
+    // MARK: - magic 自检
+
+    func testMagicEmbeddedByAppTagInit() {
+        let p = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, appTag: 5, mac: 0)
+        XCTAssertTrue(p.hasMagic, "appTag 构造应自动嵌入 magic")
+        XCTAssertEqual(p.appTag, 5)
+        XCTAssertEqual(p.tag >> 12, WatermarkPayload.magic)
+    }
+
+    func testMagicAbsentOnRawTagInit() {
+        let p = WatermarkPayload(uid: 1, timestamp: 2, pageIndex: 3, tag: 4, mac: 0)
+        XCTAssertFalse(p.hasMagic, "原始 tag: 构造不嵌入 magic，hasMagic 应为 false")
+    }
+
+    func testMagicRoundTripEncodeDecodeChroma() throws {
+        let payload = WatermarkPayload(uid: 0xDEAD_BEEF, timestamp: 12345, pageIndex: 7, appTag: 3, mac: 0)
+        XCTAssertTrue(payload.hasMagic)
+        var base = RGBAImage(width: 640, height: 900)
+        base.fill((200, 200, 200, 255))
+        base.blendTiled(BlockCodec.makeTile(payload: payload.bytes))
+        let decoded = try XCTUnwrap(BlockCodec.decode(base, payloadBits: 128))
+        let restored = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
+        XCTAssertTrue(restored.hasMagic, "解码还原的载荷 magic 应通过")
+        XCTAssertEqual(restored.uid, payload.uid)
+        XCTAssertEqual(restored.appTag, payload.appTag)
+        XCTAssertEqual(decoded.weakBits, 0)
+    }
+
+    func testFindBestOffsetReturnsCorrectPhase() throws {
+        let payload: UInt32 = 0xCAFE_BABE
+        // 用非零相位编码，auto-offset 应能找回
+        let ox = 3, oy = 5
+        var base = RGBAImage(width: 640, height: 900)
+        base.fill((180, 180, 180, 255))
+        let tile = BlockCodec.makeTile(payload: payload, payloadBits: 32)
+        base.blendTiled(tile, dx: ox, dy: oy)
+        let best = BlockCodec.findBestOffset(in: base, payloadBits: 32)
+        let result = try XCTUnwrap(
+            BlockCodec.decode(base, payloadBits: 32, offsetX: best.offsetX, offsetY: best.offsetY)
+        )
+        XCTAssertEqual(result.payload, payload, "auto-offset 找到最优相位后应能正确解码")
+    }
 }

@@ -180,7 +180,7 @@ enum WatermarkDefaultPayload {
             uid: deviceHash(),
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
             pageIndex: 0,
-            tag: 0,
+            appTag: 0,
             mac: 0
         ).bytes
     }

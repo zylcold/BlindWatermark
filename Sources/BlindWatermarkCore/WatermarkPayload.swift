@@ -7,25 +7,45 @@ import Foundation
 /// [127:96] uid        UInt32   用户 ID（原样放，不用截断、不用查表）
 /// [ 95:64] timestamp  UInt32   Unix 秒，够用到 2106 年，不用再换算时间桶
 /// [ 63:48] pageIndex  UInt16   页面注册表索引，最多 65536 个受监控页面
-/// [ 47:32] tag        UInt16   App / 端 / 环境 标识
-/// [ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断
+/// [ 47:44] magic      UInt4    固定为 0xA，解码端用来自检 payloadBits 是否与编码端一致
+/// [ 43:32] appTag     UInt12   App / 端 / 环境 标识（最多 4096 个枚举值）
+/// [ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断；无后端时填 0
 /// ```
 ///
 /// 字段全小端。`pageIndex` 不是类名本身 —— 32 字节装不下类名字符串，
 /// 由接入端维护「索引 → 类名」注册表，解码端拿索引查表还原。
 ///
+/// **magic 自检**：解码端验证 `hasMagic`，可快速发现 `--bits` 与编码端不一致的情况，
+/// 避免解出高置信度但错误的载荷而无从察觉。
+///
 /// **密钥只在服务端持有**：服务端算好 mac 下发完整 16 字节，客户端只负责渲染；
-/// 解码端拿 `--key` 校验。客户端自己算 mac 等于把密钥交出去，只防君子。
+/// 解码端拿 `--key` 校验。无后端模式下 mac 填 0 即可。
 public struct WatermarkPayload: Equatable {
     public static let byteCount = 16
     public static let payloadBits = 128
 
+    /// tag 字段高 4 bit 的固定魔数。解码端用 `hasMagic` 校验，
+    /// 不符说明 `payloadBits` 与编码端不一致、图像不含水印或载荷损坏。
+    public static let magic: UInt16 = 0xA
+
     public var uid: UInt32
     public var timestamp: UInt32
     public var pageIndex: UInt16
+    /// 原始 tag 字段：高 4 bit 为 `magic`，低 12 bit 为业务标签 `appTag`。
+    /// 直接构造时请用 `init(uid:timestamp:pageIndex:appTag:mac:)` 以自动嵌入 magic。
     public var tag: UInt16
     public var mac: UInt32
 
+    /// 业务标签（tag 低 12 bit，0–4095）。
+    public var appTag: UInt16 { tag & 0x0FFF }
+
+    /// 高 4 bit 是否等于 `magic`。
+    /// 解码后第一步就应检查此属性；不符时请勿相信其余字段。
+    public var hasMagic: Bool { (tag >> 12) == Self.magic }
+
+    // MARK: - 构造
+
+    /// 底层构造，保留 tag 原值。用于从字节流反序列化。
     public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, tag: UInt16, mac: UInt32) {
         self.uid = uid
         self.timestamp = timestamp
@@ -34,7 +54,13 @@ public struct WatermarkPayload: Equatable {
         self.mac = mac
     }
 
-    /// 算好 mac 再构造。给服务端用；客户端别拿这个入口。
+    /// 推荐构造：自动将 magic 嵌入 tag 高 4 bit。`appTag` 只取低 12 bit。
+    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, appTag: UInt16 = 0, mac: UInt32) {
+        let tagWithMagic = (Self.magic << 12) | (appTag & 0x0FFF)
+        self.init(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tagWithMagic, mac: mac)
+    }
+
+    /// 算好 mac 再构造（服务端用）。客户端别拿这个入口。
     public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, tag: UInt16, key: SymmetricKey) {
         self.init(
             uid: uid,
@@ -43,6 +69,12 @@ public struct WatermarkPayload: Equatable {
             tag: tag,
             mac: WatermarkPayload.mac(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tag, key: key)
         )
+    }
+
+    /// 嵌入 magic + HMAC 的构造（服务端用）。
+    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, appTag: UInt16 = 0, key: SymmetricKey) {
+        let tagWithMagic = (Self.magic << 12) | (appTag & 0x0FFF)
+        self.init(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tagWithMagic, key: key)
     }
 
     public init?(bytes: [UInt8]) {
