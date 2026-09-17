@@ -1,15 +1,19 @@
 ---
 name: blind-watermark
 license: MIT
-description: 从 iOS 截图中读出屏上盲水印 payload，用于定位截图来自哪台设备、什么时间、什么问题。用户给出截图并要求「读水印」「解析水印」「这截图谁发的」「盲水印」「溯源」「watermark」，或询问水印容量上限、能藏几个字、有哪些限制时使用。
+description: 从 iOS 截图中读出屏上盲水印 payload，用于定位截图来自哪台设备、什么时间、哪个构建、哪个页面。用户给出截图并要求「读水印」「解析水印」「这截图谁发的」「盲水印」「溯源」「watermark」，或询问水印容量上限、能藏几个字、有哪些限制时使用。往 App 里装水印 / 调参数 / 接入验收请用 blind-watermark-integration。
 ---
 
 # 截图盲水印解析
 
 LoveLink iOS 端在整个界面上常驻一层肉眼不可见的色度扰动（BlindWatermark，`zylcold/BlindWatermark`）。
-截图会把这层扰动带进来，于是**任何一张原始全屏截图都能反查出设备、时间与页面**。
+截图会把这层扰动带进来，于是**任何一张原始全屏截图都能反查出设备、时间、构建号与页面**。
 
 用途：用户甩一张截图过来，先解水印拿到设备/时间线索，再结合代码定位问题。
+
+**本 skill 只管解析（读截图）。** 往 App 里装水印、调参数、做接入验收看
+[`blind-watermark-integration`](../blind-watermark-integration/SKILL.md) —— 参数与载荷构造的约定在那边，
+两边必须一致（`payloadBits` / `plane` / `delta` / 载荷布局）。
 
 **最短路径**（有 `--key` 时）：
 
@@ -23,20 +27,24 @@ swift build -c release --package-path "$BW_REPO"
 
 ---
 
-## 一、容量：256 bit = uid + Unix 秒 + 页面短码 + 校验
+## 一、容量：512 bit = uid + Unix 秒 + build + 15 字符页面短码 + note + 校验
 
 ```
-[255:224] uid        32   UInt32   用户 ID 原样放，不用截断、不用查表
-[223:192] timestamp  32   UInt32   Unix 秒，精确到秒且够用到 2106 年
-[191:128] pageCode   64   UInt64   页面类名短码，10 个字符（见下）
-[127: 96] tag        32   UInt32   布局版本(4bit) / App(8bit) / 环境(8bit) / 保留
-[ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断
+[511:480] uid        32   UInt32   用户 ID 原样放，不用截断、不用查表
+[479:448] timestamp  32   UInt32   Unix 秒，精确到秒且够用到 2106 年
+[447:384] build      64   UInt64   构建号，12 位十进制 YYYYMMDDHHMM（如 202609161722），0 = 未填
+[383:288] pageCode   96           页面类名短码，15 个字符 = 90 bit（多出的 6 bit 必须为 0）
+[287:272] tag        16   UInt16   App(8) / 环境(8)
+[271: 96] note      176           自定义 note，22 字节 UTF-8
+[ 95:  0] 校验值     96            HMAC-SHA256(前 52 字节, 服务端密钥) 截断，或公开自检值
 ```
 
-32 字节，字段全小端。**256 bit 是上限**：每 tile 512 个 pair，此时每 tile 重复 2 份；
-再大重复次数降到 1，「隔一份翻转极性抵消亮度梯度」的机制就失效了。
+64 字节，字段全小端。**512 bit 是上限**：每 tile 只有 512 个 pair，再大连 1 份都放不下。
+代价是每 bit 观测减半：iPhone 16 截图（1179×2556，23287 个 pair）下每 bit 约 **45 次观测**，
+`|z|` 大致是 256 bit 布局的一半（弱 bit 变多，但校验值仍能确认对错）。
 
-iPhone 16 截图（1179×2556）下每 bit 约 90 次观测。
+**layout v3（256 bit / 32 字节）已废弃** —— 字段边界变了，老截图用现在的解码器解不出。
+要读 2026-09 之前的老图，用 1.0.0 tag 的解码器。
 
 ### 页面类名怎么进来：短码 + grep
 
@@ -47,12 +55,11 @@ iPhone 16 截图（1179×2556）下每 bit 约 90 次观测。
 BHProfileViewController        → profile
 BHChatListViewController       → chatlist
 BHLiveRoomViewController       → liveroom
-BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
+BHUserProfileEditViewController → userprofileedit   （15 字符，恰好不截断）
 ```
 
-拿到短码后 `grep -rin "class.*chatlist" --include='*.swift'` 就能定位类名 —— **不需要注册表**。
-真撞名了也只是拿到 2~3 个候选，结合截图内容判断即可（4 字符时 1000 个页面撞名概率 23%，
-所以扩到了 10 字符：那个数量级下撞名概率可忽略）。
+拿到短码后 `grep -rin "class.*userprofileedit" --include='*.swift'` 就能定位类名 —— **不需要注册表**。
+15 字符对绝大多数页面够用（剥掉冗余词缀后本来就 ≤ 15）；真撞名也只是拿到 2~3 个候选。
 
 算法（`PageNameCodec`，编解码只有这一份实现）：
 1. 取类名最后一段（丢掉 `Module.` 前缀）
@@ -60,7 +67,7 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
    `Interactor` / `Controller` / `View` / `Page` / `Screen` / `Scene` / `Cell` / `Item` / `Model` / `VC`
 3. 剥已知 App 前缀：`BH` / `JY` / `LL` / `HW` / `XQ`
 4. 转小写，只留 `a-z0-9`
-5. 取前 10 字符，每字符 6 bit 打包（37 符号表，补位符 `_`）
+5. 取前 15 字符，每字符 6 bit 打包成 12 字节（37 符号表，补位符 `_`）
 
 页面变化时 `Watermark.update(payload:)` 重画图案（相位不变，解码端无感，微秒级）。
 
@@ -69,20 +76,26 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
 **密钥只在服务端持有**：服务端算好 mac 下发完整 32 字节，客户端只负责渲染；解码端 `--key` 校验。
 客户端自己算 mac 等于把密钥交出去。96 bit mac 已足够挡住伪造与针对性碰撞。
 
-### 余量（实测，chroma + delta 8，iPhone 16 模拟器，256 bit 布局）
+### 余量（实测，chroma + delta 8，iPhone 16 模拟器，512 bit 布局）
 
 | 页面 | \|z\|中位 | 最弱 | 弱 bit |
 |---|---|---|---|
-| plain（近纯色渐变） | 161.3 | 10.6 | 0/256 |
-| whitechat（纯白 + 气泡文字） | 161.0 | 9.8 | 0/256 |
-| textlist（文字密集，最差场景） | 161.3 | 6.7 | 0/256 |
-| photogrid（照片网格） | 28.8 | 8.0 | 0/256 |
-| darkmode（深色卡片） | 161.0 | 4.9 | 0/256 |
-| mixedfeed（上白下黑 + 照片） | 160.6 | 4.8 | 0/256 |
+| plain（近纯色渐变） | 120.3 | 4.1 | 0/512 |
+| whitechat（纯白 + 气泡文字） | 113.8 | 4.7 | 0/512 |
+| textlist（文字密集，最差场景） | 120.6 | 2.9 | 1/512 |
+| photogrid（照片网格） | 35.0 | 6.6 | 0/512 |
+| darkmode（深色卡片） | 113.8 | 1.9 | 4/512 |
+| mixedfeed（上白下黑 + 照片） | 54.9 | 2.1 | 4/512 |
 
-阈值 3，余量 1.6~3.5 倍。色度平面上灰阶内容恒为零，所以文字页与纯色页的 `|z|` 同样高，
-只有大面积彩色照片会把 `|z|` 拉低。若某张图出现十几个弱 bit，通常是截断/压缩痕迹，结合 MAC 判断 ——
-**MAC 通过就是对的，弱 bit 多只说明余量小**。
+阈值 3（判定阈值是 512/8 = 64 个弱 bit）。色度平面上灰阶内容恒为零，所以文字页与纯色页的
+`|z|` 同样高，只有大面积彩色照片会把 `|z|` 拉低。
+
+**512 bit 下判定常见 WEAK，但那只是"弱 bit 不为 0"**：上面几页弱 bit 只有 0~4 个，
+离 64 的阈值很远，而 `mac=OK(自检/验签)` 已经确认解对了 ——
+**判读以校验值为准，弱 bit 只作余量参考**。最苛刻内容（照片壁纸 + 图标）实测：
+delta 8 → 弱 bit 32/512，delta 10 → 22，delta 12 → 9。
+
+**别用 luma**：512 bit 下实测 delta 12 都救不了（文字页弱 bit 139/512、照片页 103/512，判 NO）。
 
 ## 二、怎么用
 
@@ -93,31 +106,12 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
 3. `mac=未校验(需要 --key)` —— 是 HMAC 载荷但没密钥，字段能用，裁剪自愈用不了
 4. `mac=BAD(…)` —— 当失败处理，不要硬解读数字
 
-### 接入端（App 开发）
-
-```swift
-import BlindWatermark
-
-// 有服务端密钥：服务端下发 payload 后装进去；后续新 scene 自动挂载
-Watermark.install(payload: serverIssuedPayload)
-
-// 没密钥（客户端自己拼）：用公开自检值，解码端没密钥也能校验
-Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
-    pageClassName: type(of: self).description(), app: 1).bytes)
-```
-
-要点：
-- 必须用**服务端下发并签名**的 payload。默认布局（IDFV 哈希 + Unix 秒）只是 POC，不可逆、可伪造。
-- 服务端下发时把「payload → 用户/设备/时间」写进映射表，否则事后拿到数字也定位不到人。
-- 载荷里的时间戳每次都变，图案要刷新。库只在 App 回前台时重画一次，够用。
-- 三个参数 **`payloadBits` / `plane` / `delta`，解码端必须与接入端完全一致**。写进 App 的配置，别靠记忆。
-
 ### 解码端（本 skill）
 
 ```bash
-# 常规（最快，0.08s）
+# 常规（最快，0.07s）
 "$BW_REPO/.build/release/bwdecode" shot.png --layout --pages pages.json --key <hex>
-# 截图被裁过 / 不确定平面与位数（0.1s，穷举 + MAC 裁决）
+# 截图被裁过 / 不确定平面（0.14s，穷举 + 校验值裁决）
 "$BW_REPO/.build/release/bwdecode" shot.png --auto --layout --pages pages.json --key <hex>
 
 # 平面 / 位数确定，只是相位不确定（裁边但没缩放过）
@@ -127,7 +121,7 @@ Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
 "$BW_REPO/.build/release/bwdecode" --pages pages.json --dump-codes
 ```
 
-**优先用 `--auto` 并带上 `--key`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
+**优先用 `--auto`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
 却依然自洽：`|z|` 中位依然很高、弱 bit 0/256，输出看着完全正常，但 uid/时间/页面全是错的。
 `--auto` 穷举 2 平面 × 64 相位 × 512 tile 平移（位数只加显式给的 `--bits`），只有校验值能识别出正确那一组。
 纵向、横向裁剪都覆盖（含半 pair 偏移与奇数块偏移）。
@@ -137,7 +131,7 @@ SHA-256 自检值（无密钥也能验），两侧都过不去才退结构自检
 实测（4 页面 × 5 种裁剪 = 20 个用例）：带自检值 **20/20 解对**，`mac` 全 0 的载荷 19/20（近似解会漏网），
 HMAC 签名但拿不到密钥的**解不了**（没校验器）—— 这时候只能去要密钥。
 
-`--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 256 / chroma），只穷举
+`--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 512 / chroma），只穷举
 **块网格相位（mod 8）与 tile 平移**，同样走校验值阶梯。它与 `--offset` 互斥（同时给直接报错退出），
 与 `--auto` 语义重叠（也别一起给）。
 载荷没带校验值（`mac` 全 0）而调用方也没给 `--key` 时，它只能按 `|z|` 中位裁决 —— stderr 会打印警告，
@@ -146,8 +140,9 @@ HMAC 签名但拿不到密钥的**解不了**（没校验器）—— 这时候�
 输出（两行）：
 
 ```
-payload=0xefbeaddea048aa6acfe14c8e112103090000103059f32c1304708e9619bdb73c  payloadBits=256  平面=chroma  相位=(0,7)  signal=9.17  |z|中位=35.5  最弱=10.0  弱bit=0/256  OK(全部 256 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHPhotoGridViewController  layout=v3 app=1 env=0  mac=OK
+payload=0xefbeaddea5b6ab6afa75722c2f00000013714d0b224d2449922449020100686f746669782d332d7469636b65742d3132333435000137c71963ff8df233001204  payloadBits=512  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=114.5  最弱=2.9  弱bit=1/512  WEAK(1/512 bit 证据不足，结论谨慎)
+uid=3735928559(0xDEADBEEF)  time=2026-09-17 09:45:09 UTC  page=textlist → BHTextListViewController  build=202609161722  note=hotfix-3-ticket-12345  layout=v4 app=1 env=0  mac=OK(自检,未验签)
+build 时间: 2026-09-16 17:22（构建方当地墙上时间）
 ```
 
 | 字段 | 含义 |
@@ -261,15 +256,13 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 `delta 6` 时六页里弱 bit 4~182/256、文字页直接解错；`delta 12` 才让纯色/白底/深色页回到 0/256，
 文字页仍然是 `mac=BAD`。**要 256 bit 就用 chroma**，需要 luma 只能砍位数并实测。
 
-### 默认 payload 的问题
+### 载荷是谁造的，决定了能查到什么
 
-`WatermarkDefaultPayload.currentBytes()` 这套默认布局（256 bit 推荐布局）：
+- 服务端 HMAC 签名 +「payload → 用户/设备/时间」映射表 → 能定到人和设备（最可靠）
+- 客户端填公开自检值 → 能自检解对，但 **uid 是客户端自己填的，可伪造**、没有映射表也定不到人
+- 零接入默认载荷（`WatermarkDefaultPayload`）→ uid 是 IDFV 哈希，不可逆、可伪造，只够跑通链路
 
-- uid = `fnv1a(identifierForVendor.uuidString)` 的完整 32 bit，`timestamp` = 当前 Unix 秒，
-  `pageCode` = 0，`tag` = `layoutVersion << 28`，校验值是**公开自检值**。
-- 设备哈希**不可逆**，没有映射表就定位不到任何东西
-- **自检值不是签名，可以伪造** —— 攻击者能埋一个栽赃别人的 payload，且能让自检通过
-- 上生产必须换成服务端下发并 HMAC 签名的载荷
+看到 `mac=OK(自检,未验签)` 时别把 uid 当身份：它只证明"解对了"。
 
 ### 其他
 
