@@ -101,6 +101,11 @@ import BlindWatermark
 // The server computes the MAC and ships all 32 bytes; the client only renders them
 Watermark.install(payload: serverIssuedBytes)
 
+// Deployments without a key (the client builds the payload itself): fill the public self-check
+// value so the decoder can validate without any secret
+Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
+    pageClassName: type(of: self).description(), app: 1).bytes)
+
 // Update the page name code on navigation
 Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
     pageClassName: type(of: self).description(), key: key).bytes)
@@ -108,6 +113,18 @@ Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
 // The 32-bit convenience entry point still exists
 Watermark.install(payload: 0xDEAD_BEEF)
 ```
+
+The check value lives in the 96-bit `mac` field and has three flavours:
+
+| Constructed with | Field content | Decoder side |
+|---|---|---|
+| `WatermarkPayload(… key:)` | HMAC-SHA256(first 20 bytes, server key) | with a key → `mac=OK(验签)`; without → `mac=未校验(需要 --key)` |
+| `WatermarkPayload.selfChecked(…)` | SHA-256(first 20 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
+| `mac: []` / all zeros | no check value | `mac=未签名`; cropping search falls back to the structural check |
+
+The self-check catches "alignment was off by a few bits" aliases (measured: zero false positives
+over the whole search space) but **cannot stop forgery** (anyone can compute it). Preventing
+someone from planting a payload that frames another user requires server-side HMAC.
 
 With nothing configured, a default payload is used (`identifierForVendor` hash + Unix seconds),
 so it runs out of the box.
@@ -189,15 +206,41 @@ origin relative to the image; every local pair index shifts, which shows up as a
 the payload (cropping 137 px → 32 bits of rotation). A phase search only fixes block alignment
 (mod 8) and cannot fix that shift: with phase-only search the payload is rotated yet
 self-consistent — median `|z|` is high and weak bits are 0/256, it looks perfectly fine and is
-simply wrong. **The only reliable arbiter is the MAC.**
+simply wrong. **The only reliable arbiter is the check value.**
+
+### Validator ladder
+
+Crop recovery is decided by a **check value** (a wrong shift produces a perfectly self-consistent
+payload, so brute force without an arbiter is guessing). The CLI runs three passes:
+
+1. strict validator (HMAC or public self-check) + regular phases
+2. strict validator + **block parity** (`ox` in 0..<16) — rescues horizontal crops by an **odd
+   number of blocks**
+3. structural check as a last resort (only option when the payload carries no check value); it
+   prints a warning and does not guarantee a correct payload
+
+Pass 2 fixes a real gap: a pair is two adjacent blocks, so when the block grid is offset by one
+block the decoder pairs blocks that straddle two pattern pairs; the reading becomes the sum of two
+neighbouring bits (observations survive only where both bits agree) and some bits end up with no
+evidence at all. Measured on a text-heavy page cropped by 40 px: the plain phase search cannot find
+truth, while with block parity it shows up at `ox=8, rotation=3` and median `|z|` goes from 58.9
+back to 67.3 (the same as an even-block crop).
+
+Measured on real pixels (4 pages × 5 crops = 20 cases, no key given):
+
+| Payload | `--auto` without a key |
+|---|---|
+| carries the public self-check value | **20/20 correct** |
+| `mac` all zeros (no check value, structural fallback) | 19/20 (a near-copy slips through) |
+| HMAC-signed but no key available | cannot decode (no arbiter) — get the key or have the sender also embed a self-check value |
 
 Horizontal shifts must be taken **modulo per row and column separately** (a shift wraps to column
 0 of the same row at the tile's right edge). Adding an offset to the linear index pushes 1/16 of
-the observations into the next row; the z values still look great and only the MAC catches it —
-see `BlockCodecTests.testAutoSurvivesHorizontalCrop`.
+the observations into the next row; the z values still look great and only the check value catches
+it — see `BlockCodecTests.testAutoSurvivesHorizontalCrop`.
 
 The ranking order follows from this: stage one sorts the 16 best-aligned phases by `|z|`, stage two
-enumerates shifts on those and checks the MAC. Ranking by `signal` would be wrong — it is inflated
+enumerates shifts on those and checks the check value. Ranking by `signal` would be wrong — it is inflated
 by content: a watermark-free luma plane scores 19 while a watermarked chroma plane scores 9, so
 it would pick the wrong plane.
 
@@ -254,7 +297,9 @@ and `tools/test_bwdecode.py` cross-checks them on the same PNG.
 [223:192] timestamp  32   UInt32   Unix seconds, second precision
 [191:128] pageCode   64   UInt64   page class name code, 10 × 6-bit characters = 60 bit
 [127: 96] tag        32   UInt32   [31:28] layout version [27:20] app [19:12] env [11:0] reserved
-[ 95:  0] mac        96            HMAC-SHA256(first 20 bytes, server key) truncated to 96 bit
+[ 95:  0] mac        96            HMAC-SHA256(first 20 bytes, server key), truncated
+                                    or SHA-256(first 20 bytes) truncated (public self-check)
+                                    or all zeros (no check value)
 ```
 
 **Why 256 bit**: a 10-character page code alone needs 60 bit, so 128 bit does not fit; going any
@@ -264,9 +309,8 @@ luma gradient" mechanism (upper bound in `BlockCodec.maxPayloadBits`).
 Zero-touch mode (no `Watermark.install`, no `payloadProvider`) builds a **256-bit recommended
 layout** via `WatermarkDefaultPayload.currentBytes()`: uid = full 32 bits of
 `fnv1a(identifierForVendor.uuidString)`, timestamp = current Unix seconds (**no 10-minute
-bucketing**), pageCode = 0, tag = `layoutVersion << 28`, mac empty.
-An empty `mac` means **no signature verification and forgeable**, and the device hash is
-irreversible — good enough to prove the pipeline works.
+bucketing**), pageCode = 0, tag = `layoutVersion << 28`, and the check field holds the **public
+self-check value** (the device hash is irreversible, but at least "decoded correctly" is provable).
 **In production it must be replaced by a server-issued, signed payload**, otherwise the watermark
 cannot identify anyone and can be forged to frame someone.
 
@@ -274,13 +318,18 @@ cannot identify anyone and can be forged to frame someone.
 
 ### Unit tests
 
-`swift test` covers 41 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+`swift test` covers 46 cases (runs on macOS, no simulator needed): pure white / pure black / mid
 grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
-(vertical and horizontal), the `delta = 2` floor, no false positives on watermark-free images,
-tile geometry contracts, decodability of both chroma and luma, adversarial chroma textures not
-silently decoding wrong, `--auto` phase / plane / bit-count detection, the 256-bit layout
-round-trip with MAC tamper detection, `findBestOffset` (arbiter-driven) and
+(vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
+watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
+chroma textures not silently decoding wrong, `--auto` phase / plane / bit-count detection, the
+256-bit layout round-trip with all three check tiers (HMAC / public self-check / unsigned),
+near-copy aliases being rejected by the self-check but not by the structural check, block parity
+restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
 PageRegistry / PageNameCodec.
+
+`python3 tools/test_bwdecode.py` adds 57 checks and cross-checks against the Swift binary on the
+same PNG.
 
 ### Per-page simulator measurements
 
@@ -315,7 +364,22 @@ visible to the eye. **Use chroma with 256 bits**; if you really need luma, shrin
 re-measure with `Demo/sweep.sh` first.
 
 > A large `signal` means large content noise and says nothing about decodability (the luma text
-> page scores 20 yet is the worst). What decides is `|z|` and the MAC.
+> page scores 20 yet is the worst). What decides is `|z|` and the check value.
+
+Verdicts versus the check value: when the verdict says `NO` / `WEAK` but `mac=OK(…)`, **the check
+value wins** — weak bits only mean little margin, not a wrong payload. Conversely a payload that
+carries a check value and fails it (`mac=BAD`) must be treated as a failure; do not read the
+numbers anyway.
+
+The `mac` field is reported in tiers (end of the second `--layout` line):
+
+| Output | Meaning |
+|---|---|
+| `mac=OK(验签)` | HMAC verified — account/time trustworthy and unforged |
+| `mac=OK(自检,未验签)` | public self-check passed — proves "decoded correctly", **not** "not forged" |
+| `mac=未签名(字段自洽,退结构自检)` | payload carries no check value; crop conclusions unreliable |
+| `mac=未校验(需要 --key)` | HMAC-signed payload but no key given |
+| `mac=BAD(密钥不符或载荷被改)` | key given and neither check matches |
 
 When validating an integration with different layouts, run `Demo/sweep.sh` and re-measure instead
 of copying these numbers:
@@ -335,9 +399,11 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin 
   ask the user for the **original** image.
 - **Photographing the screen does not work**: moiré and geometric distortion wreck the block grid;
   that path needs a sync template plus deep learning and is out of scope here.
-- **Cropping does work**: `--auto` with `--key` covers vertical and horizontal crops (including
-  half-pair offsets). Without `--key` it degrades to guessing by median `|z|` and guarantees
-  nothing.
+- **Cropping does work**: `--auto` covers vertical and horizontal crops (including half-pair and
+  odd-block offsets). The arbiter is the check value: pass `--key` for a server HMAC, or rely on
+  the payload's public self-check value. With neither (`mac` all zeros) it falls back to the
+  structural check — measured 19/20 on the 20-case real-pixel sweep, and the one miss looks like a
+  plausible answer.
 
 ## Simulator smoke test
 
@@ -359,7 +425,7 @@ Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun s
 `.github/workflows/ci.yml` runs four things on every PR:
 
 1. `swift build` (all targets compile)
-2. `swift test` (41 core test cases)
+2. `swift test` (46 core test cases)
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
    `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
    `swift test` cannot reach on macOS.

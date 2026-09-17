@@ -86,13 +86,24 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
 
 ## 二、怎么用
 
+### 判定优先级
+
+1. `mac=OK(验签)` / `mac=OK(自检,未验签)` —— 载荷可信，直接用 uid / time / page
+2. `mac=未签名(…)` —— 整屏图字段可用，但**只要图被裁过就不能信**（退结构自检，实测 20 个用例错 1 个）
+3. `mac=未校验(需要 --key)` —— 是 HMAC 载荷但没密钥，字段能用，裁剪自愈用不了
+4. `mac=BAD(…)` —— 当失败处理，不要硬解读数字
+
 ### 接入端（App 开发）
 
 ```swift
 import BlindWatermark
 
-// 服务端下发 payload 后装进去；后续新 scene 自动挂载
+// 有服务端密钥：服务端下发 payload 后装进去；后续新 scene 自动挂载
 Watermark.install(payload: serverIssuedPayload)
+
+// 没密钥（客户端自己拼）：用公开自检值，解码端没密钥也能校验
+Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
+    pageClassName: type(of: self).description(), app: 1).bytes)
 ```
 
 要点：
@@ -118,16 +129,19 @@ Watermark.install(payload: serverIssuedPayload)
 
 **优先用 `--auto` 并带上 `--key`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
 却依然自洽：`|z|` 中位依然很高、弱 bit 0/256，输出看着完全正常，但 uid/时间/页面全是错的。
-`--auto` 穷举 2 平面 × 64 相位 × 512 tile 平移（位数只加显式给的 `--bits`），只有 MAC 能识别出正确那一组。
-纵向、横向裁剪都覆盖（横向平移按行列分别回卷，不是线性索引）。
-没有 `--key` 时 `--auto` 只能用时间戳合理性做弱校验，可靠性差一个档次 —— **能要到密钥就去要。**
+`--auto` 穷举 2 平面 × 64 相位 × 512 tile 平移（位数只加显式给的 `--bits`），只有校验值能识别出正确那一组。
+纵向、横向裁剪都覆盖（含半 pair 偏移与奇数块偏移）。
+
+**没密钥也行，只要载荷带了公开自检值**：解码器先验 HMAC（有密钥时），再验载荷自带的
+SHA-256 自检值（无密钥也能验），两侧都过不去才退结构自检并打警告。
+实测（4 页面 × 5 种裁剪 = 20 个用例）：带自检值 **20/20 解对**，`mac` 全 0 的载荷 19/20（近似解会漏网），
+HMAC 签名但拿不到密钥的**解不了**（没校验器）—— 这时候只能去要密钥。
 
 `--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 256 / chroma），只穷举
-**块网格相位（mod 8）**这个自由度；**只有给了 `--key` 才额外穷举 512 tile 平移**（用 MAC 裁决）。
-它与 `--offset` 互斥（同时给直接报错退出），与 `--auto` 语义重叠（也别一起给）。
-没给 `--key` 时它没有校验器可用，只搜块网格相位、平移恒 0，**非整 tile 倍数的裁剪（平移）解不了**，
-只能按 `|z|` 中位裁决 —— stderr 会打印警告，输出**不保证正确**，这时必须看 `弱bit`，并用 `--layout` 检查字段是否合理。
-**要覆盖裁剪平移必须给 `--key`。**
+**块网格相位（mod 8）与 tile 平移**，同样走校验值阶梯。它与 `--offset` 互斥（同时给直接报错退出），
+与 `--auto` 语义重叠（也别一起给）。
+载荷没带校验值（`mac` 全 0）而调用方也没给 `--key` 时，它只能按 `|z|` 中位裁决 —— stderr 会打印警告，
+输出标注 `mac=未签名`，**不保证正确**，这时必须看 `弱bit`，并用 `--layout` 检查字段是否合理。
 
 输出（两行）：
 
@@ -146,11 +160,21 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 | `\|z\|中位` / `最弱` | 各 bit 显著度。256 bit + chroma 实测中位 29~161，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
 | `uid` / `time` / `page` / `tag` | `--layout` 解出的字段；`page` 是短码，后面带注册表命中或 grep 提示 |
-| `mac` | `--key` 给了则校验：`OK` / `BAD` / `未校验` |
+| `mac` | 校验分档（见下），**判读优先级最高** |
 | 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印 |
 
-判定与 MAC 冲突时以 MAC 为准：`WEAK`/`NO` 但 `mac=OK` 仍是正确载荷（只是余量小）；
-`mac=BAD` 一律当失败，**不要硬解读数字**。
+校验分档（`--layout` 第二行末尾）：
+
+```
+mac=OK(验签)                    HMAC 通过，账号/时间可信且未被伪造
+mac=OK(自检,未验签)             公开自检值通过 —— 证明"解对了"，不证明"没被伪造"
+mac=未签名(字段自洽,退结构自检)     载荷没带校验值；裁剪场景下结论不可信
+mac=未校验(需要 --key)         载荷带 HMAC 但没密钥
+mac=BAD(密钥不符或载荷被改)      给了密钥且两种校验都对不上
+```
+
+判定与校验值冲突时以校验值为准：`WEAK`/`NO` 但 `mac=OK(...)` 仍是正确载荷（只是余量小）；
+`mac=未签名` 且图被裁过 → 必须告知用户结论不可靠；`mac=BAD` 一律当失败。
 
 **没编 Swift / 在别的机器上**：`tools/bwdecode.py` 是同逻辑的 Python 实现，
 参数、输出格式、判读规则完全一致（需要 numpy + Pillow）：
@@ -164,8 +188,9 @@ python3 "$BW_REPO/tools/bwdecode.py" shot.png --auto --layout --pages pages.json
 
 ### 标准排查流程
 
-1. 先看 `mac`。`mac=OK` → 直接采信；`mac=BAD` → 参数或截图形态不对，别读字段。
-2. 没给 `--key` 时看判定：`NO` → 走下面的排查清单；`WEAK` → 必须结合日志/用户描述交叉验证。
+1. 先看 `mac`。`mac=OK(验签)` / `mac=OK(自检,未验签)` → 直接采信；
+   `mac=未签名` → 整屏图能用，被裁过的图不要信；`mac=BAD` → 参数或截图形态不对，别读字段。
+2. 没校验值时看判定：`NO` → 走下面的排查清单；`WEAK` → 必须结合日志/用户描述交叉验证。
 3. 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
 4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把页面短码还原成类名。
    输出 `page=xxxxx（注册表无命中…）` 说明这张截图不是这份注册表登记的版本，或者该页面没登记过；
@@ -220,7 +245,7 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 |---|---|---|
 | **截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | 块边长与平铺周期一起变了。让用户重发**原图** |
 | **拍屏**（另一台手机拍屏幕） | ❌ 解不出 | 摩尔纹 + 几何畸变。需要同步模板或深度学习方案，本仓库不做 |
-| 截图被裁剪（裁掉状态栏、分享时裁边） | ⚠️ 需要补偿 | 给 `--auto --key`：纵横向裁剪都能搜回来；已知偏移也可手算 `--offset 0,-H` |
+| 截图被裁剪（裁掉状态栏、分享时裁边） | ⚠️ 需要补偿 | 给 `--auto`：纵横向裁剪都能搜回来（含半 pair 与奇数块偏移）；裁决靠 HMAC（需 `--key`）或载荷自带的公开自检值 |
 | 非整屏截图（只截一部分区域） | ⚠️ 需要补偿 | 同上，给裁剪原点相对整屏的偏移 |
 | 画面里根本没有水印（系统界面、别的 App） | `NO` | 正常，`\|z\|` 中位约 0.5、弱 bit 32/32 |
 | 色度结构恰好是 8px 尺度的画面（对抗样本） | ⚠️ 退化 | 必须判成 `WEAK`/`NO`，不允许静默给错结果（有测试兜底） |
@@ -241,10 +266,10 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 `WatermarkDefaultPayload.currentBytes()` 这套默认布局（256 bit 推荐布局）：
 
 - uid = `fnv1a(identifierForVendor.uuidString)` 的完整 32 bit，`timestamp` = 当前 Unix 秒，
-  `pageCode` = 0，`tag` = `layoutVersion << 28`，`mac` 留空。**没有时间桶、没有 16 bit 截断**。
+  `pageCode` = 0，`tag` = `layoutVersion << 28`，校验值是**公开自检值**。
 - 设备哈希**不可逆**，没有映射表就定位不到任何东西
-- **没有签名，可以伪造** —— 攻击者可以埋一个栽赃别人的 payload
-- 上生产必须换成服务端下发并签名的载荷
+- **自检值不是签名，可以伪造** —— 攻击者能埋一个栽赃别人的 payload，且能让自检通过
+- 上生产必须换成服务端下发并 HMAC 签名的载荷
 
 ### 其他
 

@@ -36,10 +36,17 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - **不新增第三方依赖。** 只用系统框架：Accelerate、CryptoKit、CoreGraphics、UIKit。
 - **平台下限 iOS 13 / macOS 11**（Demo 是 iOS 15）。用到的新 API 必须满足可用性，必要时 `@available` 兜底。
 - **编解码参数必须两端一致**：`payloadBits` / `plane` / `offset` / 载荷布局。任何一项不一致都会解出自洽但错误的结果。
+- **`mac` 字段是「校验值」，有三种语义**：HMAC-SHA256 截断（有服务端密钥）、SHA-256 截断（无密钥部署的公开自检值，
+  用 `WatermarkPayload.selfChecked` 构造）、全 0（没带校验值）。
+  **自检通过 ≠ 验签通过**：它只能拦住"对齐错了几 bit"的近似解，拦不住伪造。
+  对外输出必须分档（`mac=OK(验签)` / `mac=OK(自检,未验签)` / `mac=未签名` / `mac=未校验(需要 --key)` / `mac=BAD`），
+  不得把自检说成验签。
+- **裁剪自愈靠校验值裁决**：CLI 的阶梯是「严格校验器（HMAC 或自检值）→ 加 block 奇偶档 → 结构自检兜底」。
+  结构自检是兵底（实测全搜索空间里放过 4~17 个近似解），用到它必须打警告并如实报 `mac=未签名`。
 - **改载荷布局 = 破坏历史截图兼容。** 必须显式说明影响面，并同步 `README.md` 与 `skills/blind-watermark/SKILL.md`。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
 - **改解码逻辑要同步两处**：`Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
-  是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码）。
+  是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码、校验阶梯）。
   改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。
 - **非平凡逻辑留一个可运行校验**（单元测试或 assert 自检），不靠"我推理过"。
 - **性能结论要实测。** 不接受"预期 4–8x"这类没测过的数字；写实测值并注明测量条件（设备/模拟器、模式、样本）。

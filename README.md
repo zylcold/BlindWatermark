@@ -87,6 +87,10 @@ import BlindWatermark
 // 服务端算好 mac 下发完整 32 字节，客户端只管渲染
 Watermark.install(payload: serverIssuedBytes)
 
+// 没密钥的部署（客户端自己拼载荷）：填公开自检值，解码端没有密钥也能校验
+Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
+    pageClassName: type(of: self).description(), app: 1).bytes)
+
 // 换页时更新页面短码
 Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
     pageClassName: type(of: self).description(), key: key).bytes)
@@ -94,6 +98,17 @@ Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
 // 32 bit 便捷入口仍在
 Watermark.install(payload: 0xDEAD_BEEF)
 ```
+
+校验值有两档，都在同一个 `mac` 字段（96 bit）里：
+
+| 构造方式 | 字段内容 | 解码端 |
+|---|---|---|
+| `WatermarkPayload(… key:)` | HMAC-SHA256(前 20 字节, 服务端密钥) | 有密钥 → `mac=OK(验签)`；没密钥 → `mac=未校验(需要 --key)` |
+| `WatermarkPayload.selfChecked(…)` | SHA-256(前 20 字节) 截断 | 任何人 → `mac=OK(自检,未验签)` |
+| `mac: []` / mac 全 0 | 没有校验值 | `mac=未签名`，裁剪/相位搜索只能退结构自检 |
+
+自检值能拦住"对齐错了几 bit"的近似解（实测全搜索空间假阳性 0），但**拦不住伪造**（谁都能算）；
+要防伪造（防止有人埋一个栽赃别人的载荷）必须用服务端 HMAC。
 
 未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + Unix 秒），开箱可跑。
 
@@ -154,23 +169,45 @@ swift build -c release
 ```
 
 `--auto` 穷举 **2 平面 × 64 相位 × 512 tile 平移**（位数默认只有 256，仅当显式给 `--bits` 且 ≠256 时才追加那一种），
-用 MAC 裁决，实测 0.1s（iPhone 16 截图，M1 Pro，release 构建）。
+用校验值裁决，实测 0.1s（iPhone 16 截图，M1 Pro，release 构建）。
+
+### 校验阶梯
+
+裁剪自愈靠**校验值**裁决（错误平移会给出很干净的自洽载荷，裸穷举不叫搜索，叫猜）。CLI 跑三档：
+
+1. 严格校验器（HMAC 或公开自检值）+ 常规相位
+2. 严格校验器 + **block 奇偶档**（ox 取 0..<16）—— 救横向裁剪量是**奇数个块**的情况
+3. 结构自检兜底（载荷没带校验值时唯一能做到的），**打警告**，结论不保证正确
+
+第 2 档解决的是一个真实夹缝：pair 是两个相邻块，块网格错开一个块时解码端配的是
+跨两个 pattern pair 的块对，读出来是相邻两 bit 的和（只有两位相同时才留下观测），
+部分 bit 会稀疏到一个证据都没有。实测文字页裁 40px 就是这种：常规相位搜不到真解，
+加上奇偶档后真解出现在 `ox=8, rotation=3`，`|z|` 中位从 58.9 回到 67.3（与偶数块裁剪持平）。
+
+实测（真机像素，4 个页面 × 5 种裁剪 = 20 个用例，不给任何密钥）：
+
+| 载荷 | 无密钥的 `--auto` |
+|---|---|
+| 带公开自检值 | **20/20 解对** |
+| `mac` 全 0（没带校验值，退结构自检） | 19/20（近似解漏网） |
+| HMAC 签名但拿不到密钥 | 解不了（没校验器）—— 拿密钥或让接入端同时填自检值 |
 
 `--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 256 / chroma），只穷举
-**块网格相位（mod 8）**这个自由度；**只有给了 `--key` 才额外穷举 512 tile 平移**（用 MAC 裁决）。
-它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。没给 `--key` 时它只能按 `|z|` 中位裁决，
+**块网格相位（mod 8）**与 512 tile 平移两个自由度，同样走上面那个三档校验阶梯。
+它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。
+载荷没带校验值（`mac` 全 0）而调用方又没给 `--key` 时，它没有可靠的裁决器 —— 会打警告并退结构自检，
 **不保证解出正确载荷**，判读必须看 `弱bit`。
 
 必须搜 tile 平移的原因：裁掉非 256 整数倍的内容会让图案 tile 原点相对图片平移，
 观测到的本地 pair 索引整体位移，载荷表现为**旋转**（裁 137px → 旋转 32 bit）。
 相位搜索只修块对齐（mod 8），修不了这个平移 —— 只搜相位时载荷旋转且自洽，
-`|z|` 中位照样很高、弱 bit 0/256，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
+`|z|` 中位照样很高、弱 bit 0/256，看起来完全正常但就是错的。**唯一可靠的裁决是校验值。**
 
 横向平移必须**按行列分别取模**（在 tile 右边界回卷到本行第 0 列）。
-用线性索引加偏移会让 1/16 的观测跨到下一行，z 值依旧漂亮，只有 MAC 看得出来 —— 见
+用线性索引加偏移会让 1/16 的观测跨到下一行，z 值依旧漂亮，只有校验值看得出来 —— 见
 `BlockCodecTests.testAutoSurvivesHorizontalCrop`。
 
-判读顺序也是这么定的：阶段一按 `|z|` 排出块对齐最好的 16 组，阶段二在这些组上穷举平移并逐个验 MAC。
+判读顺序也是这么定的：阶段一按 `|z|` 排出块对齐最好的 16 组，阶段二在这些组上穷举平移并逐个验校验值。
 不能按 `signal` 排 —— 它被内容撑大，没水印的 luma 平面能拿 19，带水印的 chroma 才 9，会挑错平面。
 
 ```
@@ -187,8 +224,18 @@ WEAK 弱 bit <= payloadBits/8    勉强解出，结论要交叉验证（256 bit 
 NO   弱 bit 更多           画面里大概没有水印
 ```
 
-判定为 `NO` / `WEAK` 但 `mac=OK` 时，**MAC 才是权威**：弱 bit 只说明余量小，不代表解错。
-反过来 `mac=BAD` 一定要当成失败处理，别硬解读数字。
+判定为 `NO` / `WEAK` 但 `mac=OK(...)` 时，**校验值才是权威**：弱 bit 只说明余量小，不代表解错。
+反过来带校验值却对不上（`mac=BAD`）一定要当成失败处理，别硬解读数字。
+
+校验字段分档（`--layout` 第二行末尾）：
+
+| 输出 | 含义 |
+|---|---|
+| `mac=OK(验签)` | HMAC 通过，账号/时间可信且未被伪造 |
+| `mac=OK(自检,未验签)` | 公开自检值通过 —— 能证明"解对了"，**不能**证明"没被伪造" |
+| `mac=未签名(字段自洽,退结构自检)` | 载荷没带校验值，裁剪场景下结论不可信 |
+| `mac=未校验(需要 --key)` | 带的是 HMAC 但没给密钥 |
+| `mac=BAD(密钥不符或载荷被改)` | 给了密钥且两种校验都对不上 |
 
 无水印画面实测 `|z|` 中位 0.5、弱 bit 32/32，与带水印画面分得很开。
 
@@ -221,7 +268,9 @@ python3 tools/test_bwdecode.py
 [223:192] timestamp  32   UInt32   Unix 秒，精确到秒
 [191:128] pageCode   64   UInt64   页面类名短码，10 个 6-bit 字符 = 60 bit
 [127: 96] tag        32   UInt32   [31:28] 布局版本 [27:20] App [19:12] 环境 [11:0] 保留
-[ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断到 96 bit
+[ 95:  0] 校验值     96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断
+                                    或 SHA-256(前 20 字节) 截断（无密钥部署的公开自检值）
+                                    或全 0（没带校验值）
 ```
 
 **为什么是 256 bit**：10 字符页面短码就要 60 bit，128 bit 装不下；再大每 tile 的重复次数会低于 2，
@@ -229,18 +278,22 @@ python3 tools/test_bwdecode.py
 
 零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）用 `WatermarkDefaultPayload.currentBytes()`
 拼一个 **256 bit 推荐布局**：uid = `fnv1a(identifierForVendor.uuidString)` 的完整 32 bit，
-timestamp = 当前 Unix 秒（**没有 10 分钟时间桶**），pageCode = 0，tag = `layoutVersion << 28`，mac 留空。
-`mac` 为空 ⇒ **无法验签、可伪造**，设备哈希不可逆，只够跑通链路。
-**上生产必须换成服务端下发并签名的 payload**，否则拿到水印也定位不到人，还可能被伪造栽赃。
+timestamp = 当前 Unix 秒（**没有 10 分钟时间桶**），pageCode = 0，tag = `layoutVersion << 28`，
+校验值 = **公开自检值**（设备哈希不可逆，但至少能自检"解对了"）。
+**上生产必须换成服务端下发并验签的载荷**，否则拿到水印也定位不到人，还可能被伪造栽赃。
 
 ## 实测与边界
 
 ### 单元测试
 
-`swift test` 覆盖 41 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
-JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向）、`delta = 2` 下限、无水印画面不误报、tile 几何契约、
-chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
-256 bit 布局回环与 MAC 篡改检测、`findBestOffset` 相位搜索（校验器裁决）以及 PageRegistry / PageNameCodec。
+`swift test` 覆盖 46 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
+tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
+256 bit 布局回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
+block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
+PageRegistry / PageNameCodec。
+
+`python3 tools/test_bwdecode.py` 另有 57 项检查，并在同一张 PNG 上与 Swift 版对账。
 
 ### 模拟器逐页实测
 
@@ -290,8 +343,9 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 
   只支持原始设备像素分辨率，让用户重发**原图**。
 - **拍屏解不出**：另一台手机拍屏幕，摩尔纹与几何畸变会让块网格完全歪掉，
   需要同步模板 + 深度学习那一路方案，本仓库不做。
-- **裁剪可以解**：`--auto` 配 `--key` 覆盖纵向与横向裁剪（含非整 pair 偏移）；
-  没给 `--key` 时退化成按 `|z|` 中位猜，不保证正确。
+- **裁剪可以解**：`--auto` 覆盖纵向与横向裁剪（含非整 pair 偏移与奇数块偏移）；
+  裁决靠校验值 —— 有服务端 HMAC 就给 `--key`，没有就靠载荷自带的公开自检值。两者都没有（`mac` 全 0）
+  时只能退结构自检：实测 4 页面 × 5 裁剪 20 个用例里会错 1 个，而且错的那个长得像真解。
 
 ## 模拟器冒烟
 
@@ -313,7 +367,7 @@ xcrun simctl io booted screenshot /tmp/shot.png
 `.github/workflows/ci.yml` 对每个 PR 跑四件事：
 
 1. `swift build`（全 target 编译）
-2. `swift test`（41 例核心测试）
+2. `swift test`（46 例核心测试）
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
    编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
    编不到那部分。
