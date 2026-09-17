@@ -21,8 +21,10 @@ import Foundation
 ///
 /// **算法必须与解码端严格一致**，改动等于让所有历史截图失效，所以这里只有这一份实现。
 public enum PageNameCodec {
-    /// 短码长度（字符数）。10 × 6 bit = 60 bit
-    public static let codeLength = 10
+    /// 短码长度（字符数）。15 × 6 bit = 90 bit —— 大多数类名剥掉冗余词缀后 ≤ 15 字符，够用。
+    public static let codeLength = 15
+    /// 短码占用的字节数（96 bit，其中 90 bit 有效）；高 6 bit 必须为 0，结构自检会查
+    public static let codeByteCount = 12
 
     /// 37 个符号，每个占 6 bit。最后一个是补位符。
     public static let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789_")
@@ -62,13 +64,13 @@ public enum PageNameCodec {
         return name.lowercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
     }
 
-    /// 类名 → 短码。不足 10 字符的尾部补位符会被去掉，保证
+    /// 类名 → 短码。不足 `length` 的尾部补位符会被去掉，保证
     /// `decode(encode(code(for: name))) == code(for: name)` —— 否则和注册表比较时必然失配。
     /// 补位符 `_` 不属于归一化字符集，所以去掉不会产生歧义。
-    public static func code(for className: String) -> String {
+    public static func code(for className: String, length: Int = codeLength) -> String {
         let stem = normalizedStem(className)
-        var characters = Array(stem.prefix(codeLength))
-        while characters.count < codeLength {
+        var characters = Array(stem.prefix(length))
+        while characters.count < length {
             characters.append(padCharacter)
         }
         while characters.last == padCharacter {
@@ -77,31 +79,71 @@ public enum PageNameCodec {
         return String(characters)
     }
 
-    /// 短码 → 60 bit
-    public static func encode(_ code: String) -> UInt64 {
-        var value: UInt64 = 0
-        var characters = Array(code.prefix(codeLength))
-        while characters.count < codeLength {
-            characters.append(padCharacter)
-        }
-        for (position, character) in characters.enumerated() {
-            let index = alphabet.firstIndex(of: character) ?? alphabet.count - 1
-            value |= UInt64(index) << (6 * UInt64(position))
-        }
-        return value
+    // MARK: - 变长（v4 的 120 bit / 20 字符）
+
+    /// 短码字节数 = ceil(字符数 × 6 / 8)，再向上取到 12 字节（15 字符 → 90 bit → 12 字节）。
+    /// 多出来的 6 bit 留 0，结构自检会校验它 —— 等于白拿 6 bit 判别力。
+    public static func byteCount(forLength length: Int) -> Int {
+        max(codeByteCount, (length * 6 + 7) / 8)
     }
 
-    /// 60 bit → 短码。去掉尾部补位符。
-    public static func decode(_ value: UInt64) -> String {
+    /// 短码 → 小端字节（每字符 6 bit，低位在前）
+    public static func encodeBytes(_ code: String, length: Int = codeLength) -> [UInt8] {
+        var characters = Array(code.prefix(length))
+        while characters.count < length {
+            characters.append(padCharacter)
+        }
+        var bytes = [UInt8](repeating: 0, count: byteCount(forLength: length))
+        for (position, character) in characters.enumerated() {
+            let index = alphabet.firstIndex(of: character) ?? alphabet.count - 1
+            let bit = 6 * position
+            for offset in 0..<6 where index & (1 << offset) != 0 {
+                let target = bit + offset
+                bytes[target >> 3] |= 1 << UInt8(target & 7)
+            }
+        }
+        return bytes
+    }
+
+    /// 小端字节 → 短码。去掉尾部补位符。
+    public static func decodeBytes(_ bytes: [UInt8], length: Int = codeLength) -> String {
         var characters: [Character] = []
-        for position in 0..<codeLength {
-            let index = Int((value >> (6 * UInt64(position))) & 0x3F)
+        for position in 0..<length {
+            var index = 0
+            for offset in 0..<6 {
+                let source = 6 * position + offset
+                if source >> 3 < bytes.count, bytes[source >> 3] & (1 << UInt8(source & 7)) != 0 {
+                    index |= 1 << offset
+                }
+            }
             characters.append(index < alphabet.count ? alphabet[index] : padCharacter)
         }
         while characters.last == padCharacter {
             characters.removeLast()
         }
         return String(characters)
+    }
+
+    /// 字节里的每个 6-bit 字符是否都落在字母表内（结构自检用），且填充位必须为 0。
+    /// 字符表约束约 10 bit 判别力，填充位再给 6 bit：0..<37 合法，37..<64 非法。
+    public static func validateBytes(_ bytes: [UInt8], length: Int = codeLength) -> Bool {
+        for position in 0..<length {
+            var index = 0
+            for offset in 0..<6 {
+                let source = 6 * position + offset
+                if source >> 3 < bytes.count, bytes[source >> 3] & (1 << UInt8(source & 7)) != 0 {
+                    index |= 1 << offset
+                }
+            }
+            if index >= alphabet.count { return false }
+        }
+        // 未被字符用到的比特必须为 0（15 字符只用 90 bit，字段有 96 bit）
+        let usedBits = length * 6
+        let totalBits = bytes.count * 8
+        for bit in usedBits..<totalBits where bytes[bit >> 3] & (1 << UInt8(bit & 7)) != 0 {
+            return false
+        }
+        return true
     }
 
     /// 给 agent 用的 grep 提示。短码本身就是归一化后的前缀，直接搜即可。

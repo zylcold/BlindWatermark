@@ -27,6 +27,8 @@ public enum WatermarkPlane: String, CaseIterable {
 /// ## 为什么翻转极性
 /// 相邻块差值里混着**内容本身的梯度**（渐变、照片），大时能压过 delta。
 /// 同一个 bit 的重复观测里隔一份把极性反过来（解码端同步翻符号）：水印同向累加，梯度成对相消。
+/// 这需要每 tile 至少重复 2 份（偶数）。**512 bit 布局下每 tile 只放得下 1 份，该机制自动关闭**：
+/// 实测强色度渐变内容上没退化，代价体现在每 bit 观测数减半（见 `WatermarkPayload` 的余量表）。
 ///
 /// ## 为什么软累加而不是符号投票
 /// 内容差异经常远大于 delta，只取符号等于把水印丢掉。按带符号差值累加再除以标准误得到 z 值：
@@ -55,8 +57,8 @@ public enum BlockCodec {
     static let blockRowsPerTile = tileSize / blockSize
     /// 每个 tile 的 pair 总数
     public static let pairsPerTile = pairsPerRow * blockRowsPerTile
-    /// 载荷上限（bit）。再大每 tile 重复次数会低于 2，翻转极性就没戏了
-    public static let maxPayloadBits = 256
+    /// 载荷上限（bit）。每 tile 有 512 个 pair，再大连 1 份都放不下
+    public static let maxPayloadBits = 512
     /// 第二阶段会对入围相位继续做 tile 旋转穷举；保留 16 组足够覆盖常见退化相位，
     /// 同时把 64×512×位数 的最坏开销压在可接受范围内。
     static let maxPhaseFinalists = 16
@@ -272,7 +274,7 @@ public enum BlockCodec {
     /// 位数换读复用同一份按 pair 累积的统计。
     public static func decodeBest(
         _ image: RGBAImage,
-        payloadBitsCandidates: [Int] = [WatermarkPayload.payloadBits, 32],
+        payloadBitsCandidates: [Int] = [WatermarkPayload.payloadBits],
         planes: [WatermarkPlane] = [.chroma, .luma],
         searchPhase: Bool = true,
         searchTile: Bool = true,

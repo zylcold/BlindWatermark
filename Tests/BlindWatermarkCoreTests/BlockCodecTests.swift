@@ -320,15 +320,27 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0xDEAD_BEEF,
             timestamp: 1_765_000_000,
-            pageCode: 0x123456,
-            tag: 1,
+            build: 202609161722,
+            pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
+            app: 3,
+            environment: 1,
             key: try makeKey()
         )
         XCTAssertEqual(payload.bytes.count, WatermarkPayload.byteCount)
-        XCTAssertEqual(WatermarkPayload.byteCount, 32)
+        XCTAssertEqual(WatermarkPayload.byteCount, 64)
+        XCTAssertEqual(WatermarkPayload.payloadBits, 512)
         let restored = try XCTUnwrap(WatermarkPayload(bytes: payload.bytes))
         XCTAssertEqual(restored, payload)
         XCTAssertTrue(restored.isValid(key: try makeKey()))
+        XCTAssertEqual(restored.buildNumber, "202609161722", "build 必须原样 14 位十进制回环")
+        XCTAssertEqual(restored.note, "hotfix-3")
+        // note 现在是 22 字节
+        let longNote = WatermarkPayload(uid: 1, timestamp: 1_760_000_000, build: 0,
+                                        pageClassName: "BHProfileViewController",
+                                        note: String(repeating: "x", count: 40), key: try makeKey())
+        XCTAssertEqual(longNote.note?.count, WatermarkPayload.noteByteCount, "超长 note 截到 22 字节")
+        XCTAssertEqual(restored.pageNameCode, "profile")
     }
 
     func testHexKeyRejectsGarbage() {
@@ -338,19 +350,20 @@ final class WatermarkPayloadTests: XCTestCase {
     }
 
     func testMACDetectsTampering() throws {
-        let payload = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
+        let payload = WatermarkPayload(uid: 1, timestamp: 2, build: 202609161722, pageClassName: "BHProfileViewController", note: "n", app: 3, environment: 1, key: try makeKey())
         var tampered = payload
         tampered.uid = 99
         XCTAssertFalse(tampered.isValid(key: try makeKey()), "改了字段 mac 必须校验不过")
     }
 
     func testMACTamperOnAnySignedFieldIsCaught() throws {
-        let base = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
+        let base = WatermarkPayload(uid: 1, timestamp: 2, build: 202609161722, pageClassName: "BHProfileViewController", note: "n", app: 3, environment: 1, key: try makeKey())
         var cases: [WatermarkPayload] = []
         var a = base; a.uid = 9; cases.append(a)
         var b = base; b.timestamp = 9; cases.append(b)
-        var c = base; c.pageCode = 9; cases.append(c)
-        var d = base; d.tag = 9; cases.append(d)
+        var e = base; e.build = 202601010101; cases.append(e)
+        var c = base; c.pageCodeBytes[0] ^= 0x01; cases.append(c)
+        var d = base; d.noteBytes[0] = 0x7A; cases.append(d)
         for tampered in cases {
             XCTAssertFalse(tampered.isValid(key: try makeKey()))
         }
@@ -358,9 +371,9 @@ final class WatermarkPayloadTests: XCTestCase {
     }
 
     func testMACChangesWithKey() throws {
-        let a = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: try makeKey())
+        let a = WatermarkPayload(uid: 1, timestamp: 2, build: 202609161722, pageClassName: "BHProfileViewController", note: "n", app: 3, environment: 1, key: try makeKey())
         let otherKey = try XCTUnwrap(SymmetricKey(hex: "ffeeddccbbaa99887766554433221100"))
-        let b = WatermarkPayload(uid: 1, timestamp: 2, pageCode: 3, tag: 4, key: otherKey)
+        let b = WatermarkPayload(uid: 1, timestamp: 2, build: 202609161722, pageClassName: "BHProfileViewController", note: "n", app: 3, environment: 1, key: otherKey)
         XCTAssertNotEqual(a.mac, b.mac)
     }
 
@@ -371,7 +384,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload.selfChecked(
             uid: 0x1234_5678,
             timestamp: 1_760_000_000,
+            build: 202609161722,
             pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
             app: 1
         )
         XCTAssertEqual(payload.verification(key: nil), .selfChecked)
@@ -382,7 +397,7 @@ final class WatermarkPayloadTests: XCTestCase {
 
     /// `mac: []` 这种客户端自拼的载荷：必须报未签名，不能报 BAD（旧版会误报"密钥不符或被篡改"）
     func testUnsignedPayloadIsReportedAsUnsigned() throws {
-        let payload = WatermarkPayload(uid: 7, timestamp: 1_760_000_000, pageCode: 3, tag: WatermarkPayload.layoutVersion << 28, mac: [])
+        let payload = WatermarkPayload(uid: 7, timestamp: 1_760_000_000, build: 0, pageCodeBytes: PageNameCodec.encodeBytes("profile"), app: 0, environment: 0, noteBytes: [], mac: [])
         XCTAssertTrue(payload.isUnsigned)
         XCTAssertEqual(payload.verification(key: nil), .unsigned)
         XCTAssertEqual(payload.verification(key: try makeKey()), .unsigned)
@@ -395,7 +410,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload.selfChecked(
             uid: 0x1234_5678,
             timestamp: 1_760_000_000,
+            build: 202609161722,
             pageClassName: "BHTextListViewController",
+            note: "hotfix-3",
             app: 1
         )
         var alias = payload
@@ -409,7 +426,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0x0BAD_F00D,
             timestamp: 1_765_123_456,
+            build: 202609161722,
             pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
             app: 3,
             key: try makeKey()
         )
@@ -434,7 +453,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let restored = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
         XCTAssertEqual(restored.uid, payload.uid)
         XCTAssertEqual(restored.timestamp, payload.timestamp)
-        XCTAssertEqual(restored.pageCode, payload.pageCode)
+        XCTAssertEqual(restored.pageNameCode, payload.pageNameCode)
+        XCTAssertEqual(restored.note, payload.note)
+        XCTAssertEqual(restored.build, payload.build)
         XCTAssertEqual(restored.tag, payload.tag)
         XCTAssertEqual(restored.mac, payload.mac)
     }
@@ -448,7 +469,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0x0BAD_F00D,
             timestamp: 1_765_123_456,
+            build: 202609161722,
             pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
             app: 3,
             key: key
         )
@@ -480,7 +503,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0x0BAD_F00D,
             timestamp: 1_765_123_456,
+            build: 202609161722,
             pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
             app: 3,
             key: try makeKey()
         )
@@ -514,7 +539,9 @@ final class WatermarkPayloadTests: XCTestCase {
         let payload = WatermarkPayload(
             uid: 0x0BAD_F00D,
             timestamp: 1_765_123_456,
+            build: 202609161722,
             pageClassName: "BHProfileViewController",
+            note: "hotfix-3",
             app: 3,
             key: try makeKey()
         )
@@ -568,7 +595,7 @@ final class AutoDecodeTests: XCTestCase {
     }
 
     private func makePayload() throws -> WatermarkPayload {
-        WatermarkPayload(uid: 0x1234_5678, timestamp: 1_760_000_000, pageClassName: "BHProfileViewController", app: 1, key: try key())
+        WatermarkPayload(uid: 0x1234_5678, timestamp: 1_760_000_000, build: 202609161722, pageClassName: "BHProfileViewController", note: "hotfix-3", app: 1, key: try key())
     }
 
     /// 裁剪 + 相位未知 + 平面未指定：MAC 裁决必须命中唯一正确解
@@ -637,7 +664,7 @@ final class AutoDecodeTests: XCTestCase {
         XCTAssertEqual(decoded.payloadBytes, payload.bytes)
         let fields = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
         XCTAssertEqual(fields.uid, payload.uid)
-        XCTAssertEqual(fields.pageCode, payload.pageCode)
+        XCTAssertEqual(fields.pageNameCode, payload.pageNameCode)
     }
 
     /// 横向裁剪同样是真实的形态（分享时裁左右、拼图裁边）。
@@ -672,7 +699,9 @@ final class AutoDecodeTests: XCTestCase {
         let payload = WatermarkPayload.selfChecked(
             uid: 0x1234_5678,
             timestamp: 1_760_000_000,
+            build: 202609161722,
             pageClassName: "BHTextListViewController",
+            note: "hotfix-3",
             app: 1
         )
         let full = shot(payload: payload.bytes, plane: .chroma, offset: (0, 0))
@@ -705,7 +734,9 @@ final class AutoDecodeTests: XCTestCase {
         let payload = WatermarkPayload.selfChecked(
             uid: 0x1234_5678,
             timestamp: 1_760_000_000,
+            build: 202609161722,
             pageClassName: "BHTextListViewController",
+            note: "hotfix-3",
             app: 1
         )
         let full = shot(payload: payload.bytes, plane: .chroma, offset: (0, 0))
@@ -791,7 +822,7 @@ final class PageNameCodecTests: XCTestCase {
         XCTAssertEqual(PageNameCodec.code(for: "BHChatListViewController"), "chatlist")
         XCTAssertEqual(PageNameCodec.code(for: "BHLiveRoomViewController"), "liveroom")
         XCTAssertEqual(PageNameCodec.code(for: "BHLoginViewController"), "login")
-        XCTAssertEqual(PageNameCodec.code(for: "JYOrderDetailViewController"), "orderdetai")
+        XCTAssertEqual(PageNameCodec.code(for: "JYOrderDetailViewController"), "orderdetail")
     }
 
     func testHandlesPlainAndExoticNames() {
@@ -799,27 +830,46 @@ final class PageNameCodecTests: XCTestCase {
         XCTAssertEqual(PageNameCodec.code(for: "ViewController"), "view")
         XCTAssertEqual(PageNameCodec.code(for: "VC"), "vc", "剥到空则保留原名")
         XCTAssertEqual(PageNameCodec.code(for: "Module.BHProfileViewController"), "profile", "模块前缀要丢掉")
-        XCTAssertEqual(PageNameCodec.code(for: "BHUser_Profile_VC"), "userprofil", "下划线不参与短码，超 10 字符截断")
+        XCTAssertEqual(PageNameCodec.code(for: "BHUser_Profile_VC"), "userprofile", "下划线不参与短码")
         XCTAssertEqual(PageNameCodec.code(for: ""), "")
     }
 
     func testShortNamePads() {
-        XCTAssertEqual(PageNameCodec.decode(PageNameCodec.encode("ab")), "ab")
+        XCTAssertEqual(PageNameCodec.decodeBytes(PageNameCodec.encodeBytes("ab")), "ab")
         XCTAssertEqual(PageNameCodec.code(for: "BHVC"), "bh")
     }
 
+    /// 120 bit / 20 字符：短码 → 15 字节 → 短码必须逐字符回环
     func testEncodeDecodeRoundTrip() {
         for name in ["BHProfileViewController", "BHChatListViewController", "JYOrderDetailViewController",
                      "ABC", "ViewController", "x", ""] {
             let code = PageNameCodec.code(for: name)
-            XCTAssertEqual(PageNameCodec.decode(PageNameCodec.encode(code)), code, name)
-            XCTAssertLessThanOrEqual(PageNameCodec.encode(code), 0x0FFF_FFFF_FFFF_FFFF, "必须塞进 60 bit")
+            let bytes = PageNameCodec.encodeBytes(code)
+            XCTAssertEqual(bytes.count, 12, "15 字符 × 6 bit = 90 bit，字段 12 字节")
+            XCTAssertEqual(PageNameCodec.decodeBytes(bytes), code, name)
+            XCTAssertTrue(PageNameCodec.validateBytes(bytes), "\(name) 的短码必须全部落在 37 符号表内")
         }
     }
 
-    func testLongNamesUseFullTenCharacters() {
-        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController").count, 10)
-        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController"), "userprofil")
+    /// 15 字符：大多数类名剥完冗余词缀后正好装得下，agent 可以直接按短码找到类
+    func testLongNamesFitFifteenCharacters() {
+        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController"), "userprofileedit")
+        XCTAssertEqual(PageNameCodec.code(for: "BHUserProfileEditViewController").count, 15)
+    }
+
+    /// 15 字符只用 90 bit，字段有 96 bit —— 填充位必须为 0，结构自检会查（白拿 6 bit 判别力）
+    func testValidateBytesRejectsNonZeroPadding() {
+        var bytes = PageNameCodec.encodeBytes(PageNameCodec.code(for: "BHProfileViewController"))
+        XCTAssertTrue(PageNameCodec.validateBytes(bytes))
+        bytes[11] |= 0x40
+        XCTAssertFalse(PageNameCodec.validateBytes(bytes), "未使用区被置 1 必须拒绝")
+    }
+
+    /// 37 符号表以外的 6-bit 值必须被结构自检拒掉（这是自检的判别力来源之一）
+    func testValidateBytesRejectsOutOfAlphabet() {
+        var bytes = PageNameCodec.encodeBytes(PageNameCodec.code(for: "BHProfileViewController"))
+        bytes[0] = 0x3F  // 63 > 36，非法
+        XCTAssertFalse(PageNameCodec.validateBytes(bytes))
     }
 
     /// 4 字符时 1000 个页面撞名概率 23%（生日问题），扩到 10 字符后这批名字必须互不相同

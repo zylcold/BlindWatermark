@@ -6,19 +6,18 @@ import BlindWatermarkCore
 
 // 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma]
 //                 [--layout] [--key <hex>] [--pages <json>] [--auto]
-//   --bits    payload 有效位数，默认 256（推荐布局），必须与打水印端一致
+//   --bits    payload 有效位数，默认 512（layout v4），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
 //   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位与 tile 平移（rotation）。
 //             裁剪自愈靠校验值裁决：有 --key 验 HMAC，没 --key 就验载荷自带的公开自检值。
-//             两者都没有（mac 全 0）时退化为结构自检，**不保证解出正确载荷**，会打警告。
+//             两者都没有（校验值全 0）时退化为结构自检，**不保证解出正确载荷**，会打警告。
 //             与 --offset 互斥；与 --auto 语义重叠，别一起用
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
-//   --layout  按 256 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
-//   --key     服务端密钥（hex），配合 --layout 校验 mac
+//   --layout  按 layout v4 解读字段（uid / 时间 / build / 页面短码 / note / 标签）
+//   --key     服务端密钥（hex），配合 --layout 校验
 //   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
 //   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
-//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × 512 tile 平移，
-//             位数默认只有 256，只有显式给了 --bits 且 ≠256 才追加那一种；
+//   --auto    截图被裁过 / 不确定平面时用：穷举 64 相位 × 双平面 × 512 tile 平移；
 //             同样靠校验值裁决（密钥 → HMAC，无密钥 → 公开自检值）；
 //             都没有则退结构自检并警告 —— 近似解会漏网，必须看弱 bit
 
@@ -282,25 +281,19 @@ if showLayout {
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
     formatter.timeZone = TimeZone(identifier: "UTC")
     // 校验分档必须如实写：自检值通过只证明"解对了"，不证明"没被伪造"。
-    let macLine: String
+    let checkLine: String
     switch payload.verification(key: key) {
     case .signed:
-        macLine = "mac=OK(验签)"
+        checkLine = "mac=OK(验签)"
     case .selfChecked:
-        macLine = "mac=OK(自检,未验签)"
+        checkLine = "mac=OK(自检,未验签)"
     case .unsigned:
-        macLine = payload.isPlausible
+        checkLine = payload.isPlausible
             ? "mac=未签名(字段自洽,退结构自检)"
             : "mac=未签名(字段不自洽,谨慎)"
     case .failed:
         // 没给密钥时无法区分"服务端 HMAC"与"真的坏了"，按未校验报，不吓人
-        macLine = key == nil ? "mac=未校验(需要 --key)" : "mac=BAD(密钥不符或载荷被改)"
-    }
-    // 新旧布局的 mac 覆盖范围相同（都是前 12 字节），所以旧截图 mac 照样通过，
-    // 但 page/tag 字段边界变了 —— 靠 layout 版本位显式提示，别让 agent 误读。
-    if payload.layoutVersion != WatermarkPayload.layoutVersion {
-        print("注意: 这张截图是 layout=v\(payload.layoutVersion)，当前布局是 v\(WatermarkPayload.layoutVersion)，"
-            + "page/tag 字段边界不同，下面的解读可能是错的")
+        checkLine = key == nil ? "mac=未校验(需要 --key)" : "mac=BAD(密钥不符或载荷被改)"
     }
     let code = payload.pageNameCode
     let pageLine: String
@@ -317,18 +310,41 @@ if showLayout {
     } else {
         pageLine = "page=\(code)（无注册表，直接 \(PageNameCodec.grepHint(forCode: code))）"
     }
+    // build 原样打 12 位十进制（外部传入的构建号）
+    let buildLine: String
+    if payload.build == 0 {
+        buildLine = "build=未填"
+    } else {
+        buildLine = "build=\(payload.buildNumber)"
+    }
+    let noteLine = payload.note.map { $0.isEmpty ? "note=（空）" : "note=\($0)" } ?? "note=（非法 UTF-8）"
+    // 格式串的转换符数量必须与参数一一对应 —— 个数对不上会直接 SIGSEGV
     print(String(
-        format: "uid=%u(0x%08X)  time=%@  %@  layout=v%u app=%u env=%u  %@",
+        format: "uid=%u(0x%08X)  time=%@  %@  %@  %@  layout=v%u app=%u env=%u  %@",
         payload.uid,
         payload.uid,
         formatter.string(from: date),
         pageLine,
-        payload.layoutVersion,
+        buildLine,
+        noteLine,
+        WatermarkPayload.layoutVersion,
         payload.app,
         payload.environment,
-        macLine
+        checkLine
     ))
+    if payload.build != 0 {
+        print(buildClockLine(payload.build))
+    }
 } else if let payload = fields(of: result), payload.isUnsigned {
     // 没开 --layout 也要提醒：无校验值的载荷在裁剪场景下不可信
     warn(noValidatorWarning)
+}
+
+/// build 号是外部传入的 12 位十进制（YYYYMMDDHHMM，如 202609161722），这里渲染成可读时间。
+/// 语义上它就是构建方当地的墙上时间，不做时区换算，直接按数字拆。
+func buildClockLine(_ build: UInt64) -> String {
+    let digits = String(format: "%012llu", build)
+    guard digits.count == 12 else { return "build 时间: 非法（不是 12 位十进制）" }
+    func slice(_ offset: Int) -> String { String(digits.dropFirst(offset).prefix(2)) }
+    return "build 时间: \(digits.prefix(4))-\(slice(4))-\(slice(6)) \(slice(8)):\(slice(10))（构建方当地墙上时间）"
 }

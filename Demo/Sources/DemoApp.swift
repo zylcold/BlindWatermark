@@ -40,14 +40,22 @@ enum DemoWatermark {
         Watermark.update(payload: payload(page: page))
     }
 
+    /// layout v4：uid + Unix 秒 + build + 20 字符页面短码 + note + 校验值。
+    /// build 与 note 都是外部传入（真实项目里来自 CI 环境变量 / 打包脚本）：
+    /// `SIMCTL_CHILD_BW_BUILD=202609161722 SIMCTL_CHILD_BW_NOTE="hotfix-3"`。
     private static func payload(page: DemoPage) -> [UInt8] {
+        let env = ProcessInfo.processInfo.environment
         let timestamp = UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max))))
-        // `BW_SELFCHECK=1` 模拟"无密钥部署"：mac 位置放公开自检值。解码端没有密钥也能完成裁剪自愈。
-        if ProcessInfo.processInfo.environment["BW_SELFCHECK"] == "1" {
+        let build = UInt64(env["BW_BUILD"] ?? "") ?? 0
+        let note = env["BW_NOTE"] ?? ""
+        // `BW_SELFCHECK=1` 模拟"无密钥部署"：校验值位置放公开自检值，解码端没有密钥也能裁剪自愈。
+        if env["BW_SELFCHECK"] == "1" {
             return WatermarkPayload.selfChecked(
                 uid: demoUID,
                 timestamp: timestamp,
+                build: build,
                 pageClassName: page.className,
+                note: note,
                 app: demoTag
             ).bytes
         }
@@ -55,7 +63,9 @@ enum DemoWatermark {
         return WatermarkPayload(
             uid: demoUID,
             timestamp: timestamp,
+            build: build,
             pageClassName: page.className,
+            note: note,
             app: demoTag,
             key: key
         ).bytes

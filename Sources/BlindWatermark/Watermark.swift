@@ -64,7 +64,7 @@ public enum Watermark {
     }
 
     /// 零接入模式下的 payload 来源。默认用 `identifierForVendor` 哈希 + Unix 秒
-    /// 拼一个 256 bit 推荐布局（`WatermarkDefaultPayload.currentBytes()`）。
+    /// 拼一个 layout v4（512 bit）载荷（`WatermarkDefaultPayload.currentBytes()`）。
     ///
     /// 生产环境应当换掉：payload 需要服务端下发并签名，客户端不要持有明文映射表。
     public static var payloadProvider: (() -> [UInt8])? {
@@ -195,7 +195,8 @@ final class WatermarkState {
     }
 }
 
-/// 默认 payload：uid 位填设备哈希，时间戳填当前 Unix 秒，页面/标签留 0，mac 填**公开自检值**。
+/// 默认 payload（layout v4, 512 bit）：uid 位填设备哈希，时间戳填当前 Unix 秒，
+/// build / 页面短码 / note 留空，校验值填**公开自检值**。
 ///
 /// ponytail: 自检值能拦"解错了"，但拦不住伪造（谁都能算）—— 上生产换成服务端下发并验签的 payload。
 enum WatermarkDefaultPayload {
@@ -203,8 +204,8 @@ enum WatermarkDefaultPayload {
         WatermarkPayload.selfChecked(
             uid: deviceHash(),
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
-            pageCode: 0,
-            tag: WatermarkPayload.layoutVersion << 28
+            build: 0,
+            pageClassName: ""
         ).bytes
     }
 
