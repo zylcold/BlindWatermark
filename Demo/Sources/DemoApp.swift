@@ -18,7 +18,7 @@ struct DemoApp: App {
     }
 }
 
-/// 演示 128 bit 推荐布局：uid + Unix 秒 + 页面索引 + 标签 + mac。
+/// 演示 256 bit 推荐布局：uid + Unix 秒 + 页面短码 + 标签 + mac。
 /// 换页时用 `Watermark.update` 重画图案 —— 相位不变，解码端无感。
 enum DemoWatermark {
     static let keyHex = "00112233445566778899aabbccddeeff"
