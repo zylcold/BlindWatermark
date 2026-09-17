@@ -5,3 +5,5 @@ DerivedData/
 .DS_Store
 Demo/Demo.xcodeproj/
 Demo/*.xcodeproj/xcuserdata/
+__pycache__/
+*.pyc
