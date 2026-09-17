@@ -59,7 +59,7 @@ luma 模式的代价就是那 6/255 的亮度网格，凑近看得见 —— 这
 import BlindWatermark
 import BlindWatermarkCore
 
-// 服务端算好 mac 下发完整 16 字节，客户端只管渲染
+// 服务端算好 mac 下发完整 32 字节，客户端只管渲染
 Watermark.install(payload: serverIssuedBytes)
 
 // 换页时更新页面索引
@@ -115,11 +115,14 @@ swift build -c release
 ```
 
 `--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转 × 2 位数种**，用 MAC 裁决，实测 0.5s。
+平面与位数已经确定、只是相位不确定时用 `--auto-offset`（`--bits` / `--plane` 照样生效，同样穷举相位 × tile 旋转）：
+它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。没给 `--key` 时它只能按 `|z|` 中位裁决，
+**不保证解出正确载荷**，判读必须看 `弱bit`。
 
 必须搜 tile 旋转的原因：裁掉非 256 整数倍的内容会让图案 tile 原点相对图片平移，
 `localPairIndex` 整体位移，载荷表现为**旋转**（裁 137px → 旋转 32 bit）。
 相位搜索只修块对齐（mod 8），修不了这个平移 —— 只搜相位时载荷旋转且自洽，
-`|z|` 中位照样 98、弱 bit 0/128，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
+`|z|` 中位照样很高、弱 bit 0/256，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
 
 判读顺序也是这么定的：阶段一按 `|z|` 排出块对齐最好的 16 组，阶段二在这些组上穷举旋转并逐个验 MAC。
 不能按 `signal` 排 —— 它被内容撑大，没水印的 luma 平面能拿 19，带水印的 chroma 才 9，会挑错平面。
@@ -144,20 +147,30 @@ Agent 用法见 [`.agents/skills/blind-watermark/SKILL.md`](.agents/skills/blind
 
 ## 默认 payload 布局
 
+`WatermarkPayload.payloadBits` = 256 bit / 32 字节，字段全小端。
+`Sources/BlindWatermarkCore/WatermarkPayload.swift` 的文档注释是唯一权威，这里是副本：
+
 ```
-高 16 位 = FNV-1a(identifierForVendor) & 0xFFFF   // 设备哈希，不可逆，需查表
-低 16 位 = floor(unixTime / 600) & 0xFFFF          // 时间桶，粒度 10 分钟
+[255:224] uid        32   UInt32   用户 ID 原样放
+[223:192] timestamp  32   UInt32   Unix 秒，精确到秒
+[191:128] pageCode   64   UInt64   页面类名短码，10 个 6-bit 字符 = 60 bit
+[127: 96] tag        32   UInt32   [31:28] 布局版本 [27:20] App [19:12] 环境 [11:0] 保留
+[ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断到 96 bit
 ```
 
-时间桶 16 bit 每 `65536 × 600s ≈ 455 天` 环绕一次。
+**为什么是 256 bit**：10 字符页面短码就要 60 bit，128 bit 装不下；再大每 tile 的重复次数会低于 2，
+「隔一份翻转极性抵消亮度梯度」的机制就失效了（上限见 `BlockCodec.maxPayloadBits`）。
 
-这是 POC 级布局：无法验签、可伪造、设备哈希不可逆。**上生产必须换成服务端下发并签名的 payload**，
-否则拿到水印也定位不到人，还可能被伪造栽赃。
+零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）仍会退回旧的 32 bit POC 布局：
+`FNV-1a(identifierForVendor)` 高 16 位 + 10 分钟时间桶低 16 位。它**无法验签、可伪造、设备哈希不可逆**，
+只够跑通链路。**上生产必须换成服务端下发并签名的 payload**，否则拿到水印也定位不到人，还可能被伪造栽赃。
 
 ## 已验证 / 未验证
 
-`swift test` 覆盖（11 例）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
-JPEG q=0.8 与 q=0.6、局部裁剪、`delta = 2` 下限、无水印画面不误报。
+`swift test` 覆盖（40 例，macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+JPEG q=0.8 与 q=0.6、局部裁剪、`delta = 2` 下限、无水印画面不误报、tile 几何契约、
+chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
+256 bit 布局回环与 MAC 篡改检测、`findBestOffset` 相位搜索（校验器裁决）以及 PageRegistry / PageNameCodec。
 
 **模拟器逐页实测**（`Demo/`，iPhone 16，每页 payload 均为 0xDEADBEEF）：
 

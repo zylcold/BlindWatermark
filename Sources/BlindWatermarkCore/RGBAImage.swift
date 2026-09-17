@@ -62,7 +62,7 @@ public struct RGBAImage {
         let rowStart = max(0, y)
         let rowEnd = min(height, y + h)
         guard colEnd > colStart, rowEnd > rowStart else { return }
-        // 把 4 字节像素合成一个 UInt32，用 memset_pattern4 按行批量填充，比逐像素写快约 8x
+        // 把 4 字节像素合成一个 UInt32，用 memset_pattern4 按行批量填充，替代逐像素写循环（未在本环境基准测试）
         var pattern = UInt32(rgba.0) | UInt32(rgba.1) << 8 | UInt32(rgba.2) << 16 | UInt32(rgba.3) << 24
         let fillBytes = (colEnd - colStart) * 4
         pixels.withUnsafeMutableBytes { raw in
@@ -113,7 +113,8 @@ public struct RGBAImage {
 
     /// 解码用的特征平面。逐像素标量，量纲与像素值一致。
     ///
-    /// 使用 Accelerate/vDSP 向量化，相较纯 Swift 循环约快 4–8x。
+    /// 使用 Accelerate/vDSP 向量化（`vDSP_vfltu8` 解交织 + `vsma` 加权）。未在本环境做基准测试，
+    /// 所以不写倍数；要写数字必须先实测并注明测量条件。
     func featureBuffer(_ plane: WatermarkPlane) -> [Double] {
         let n = width * height
         guard n > 0 else { return [] }
