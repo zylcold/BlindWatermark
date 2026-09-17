@@ -67,7 +67,7 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
 | photo | 111.6 | 23.9 |
 
 阈值 3，余量 30 倍以上。tile 是 256 设备像素 / 8px 块 → **每 tile 512 个 pair**，
-128 bit 每 tile 重复 4 份，iPhone 16 截图上每 bit 约 182 次观测。
+256 bit 每 tile 重复 2 份，iPhone 16 截图上每 bit 约 91 次观测。
 
 ## 二、怎么用
 
@@ -102,12 +102,21 @@ swift build -c release --package-path "$BW_REPO"
 
 # 截图被裁过 / 参数不确定（0.5s，穷举 + MAC 裁决）
 "$BW_REPO/.build/release/bwdecode" shot.png --auto --layout --pages <页面注册表.json> --key <服务端密钥hex>
+
+# 平面 / 位数确定，只是相位不确定（裁边但没缩放过）
+"$BW_REPO/.build/release/bwdecode" shot.png --auto-offset --layout --pages <页面注册表.json> --key <服务端密钥hex>
 ```
 
 **优先用 `--auto` 并带上 `--key`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
-却依然自洽：`|z|` 中位 98、弱 bit 0/128，输出看着完全正常，但 uid/时间/页面全是错的。
+却依然自洽：`|z|` 中位依然很高、弱 bit 0/256，输出看着完全正常，但 uid/时间/页面全是错的。
 `--auto` 穷举 2 平面 × 64 相位 × 512 tile 旋转 × 位数，只有 MAC 能识别出正确那一组。
 没有 `--key` 时 `--auto` 只能用时间戳合理性做弱校验，可靠性差一个档次 —— **能要到密钥就去要。**
+
+`--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 256 / chroma），只穷举
+**块网格相位（mod 8）× 512 tile 旋转**这两个裁剪引入的自由度。
+它与 `--offset` 互斥（同时给直接报错退出），与 `--auto` 语义重叠（也别一起给）。
+没给 `--key` 时它没有校验器可用，只能按 `|z|` 中位裁决 —— stderr 会打印警告，
+输出**不保证正确**，这时必须看 `弱bit`，并用 `--layout` 检查字段是否合理。
 
 输出（两行）：
 
@@ -134,8 +143,9 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 1. 先看判定。`NO` → 走下面的排查清单，别硬解读数字。
 2. `WEAK` → 结果可能对，但必须结合日志/用户描述交叉验证。
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
-4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把索引还原成类名。
-   界面提示「索引越界：注册表与截图版本不符」说明注册表和这张截图不是同一版，别硬猜。
+4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把页面短码还原成类名。
+   输出 `page=xxxxx（注册表无命中…）` 说明这张截图不是这份注册表登记的版本，或者该页面没登记过；
+   短码是从类名算出来的，按提示 `grep` 类名即可，不需要表也能定位。
 5. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，256 bit 布局的时间戳
    已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
 
@@ -148,7 +158,8 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 ["BHLoginViewController", "BHProfileViewController", "BHChatListViewController"]
 ```
 
-越界返回 `nil` 而不是硬猜类名。表换版本旧截图就对不上，建议带版本号进 git。
+`PageRegistry.matches(code:)` 命中不到返回空数组（不是硬猜一个类名，也不是按索引越界），
+所以**表与截图版本漂移不会解出错答案**，最多是没命中、退化成 `grep` 提示。表建议带版本号进 git。
 
 ### 直接调用 API
 
@@ -156,8 +167,8 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 import BlindWatermarkCore
 
 let image = RGBAImage(cgImage: cgImage)!
-let result = BlockCodec.decode(image, payloadBits: 128, plane: .chroma)!
-print(result.payloadBytes)                       // 16 字节
+let result = BlockCodec.decode(image, payloadBits: 256, plane: .chroma)!
+print(result.payloadBytes)                       // 32 字节
 let fields = WatermarkPayload(bytes: result.payloadBytes)
 print(fields.uid, fields.timestamp, fields.pageNameCode)  // pageNameCode 拿去 grep
 
@@ -167,6 +178,12 @@ let best = BlockCodec.decodeBest(image, validate: { decoded in
     guard let f = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
     return f.isValid(key: key)
 })!
+
+// 平面 / 位数已知，只想求相位：给它一个校验器，否则它只是「块对齐最好」不代表解对了
+let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chroma, validate: { decoded in
+    guard let f = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+    return f.isValid(key: key)
+})
 ```
 
 ---
@@ -179,7 +196,7 @@ let best = BlockCodec.decodeBest(image, validate: { decoded in
 |---|---|---|
 | **截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | 块边长与平铺周期一起变了。让用户重发**原图** |
 | **拍屏**（另一台手机拍屏幕） | ❌ 解不出 | 摩尔纹 + 几何畸变。需要同步模板或深度学习方案，本仓库不做 |
-| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 给 `--offset`。裁掉顶部 H 像素 → `--offset 0,-H` |
+| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 给 `--auto-offset`（配 `--key`）自动搜相位；已知偏移也可手算 `--offset 0,-H` |
 | 非整屏截图（只截一部分区域） | ⚠️ 需要补偿 | 同上，给裁剪原点相对整屏的偏移 |
 | 画面里根本没有水印（系统界面、别的 App） | `NO` | 正常，`\|z\|` 中位约 0.5、弱 bit 32/32 |
 | 色度结构恰好是 8px 尺度的画面（对抗样本） | ⚠️ 退化 | 必须判成 `WEAK`/`NO`，不允许静默给错结果（有测试兜底） |
