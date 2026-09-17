@@ -52,6 +52,14 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - 阈值 / 调参常量提成 `static let` 并注明来源（实测数据），不在函数体里撒魔法数字。
 - 指针与 Accelerate 代码：显式检查长度不变量与越界边界，注释标出 stride 语义。
 
+## 版本与发布
+
+- 三个 podspec 的 `s.version` 必须**同时**改（`BlindWatermark` 用 `~> <版本>` 依赖另两个），
+  改完打同名 tag，**不带 `v` 前缀**：`1.0.0`。SPM 与 CocoaPods 都按这个 tag 解析。
+- README 中英两份顶部的「版本」行同步改，并在 GitHub Releases 写一段发布说明（做了什么、怎么验证）。
+- 平台下限变更（`Package.swift` 的 `platforms`、podspec 的 `ios.deployment_target`）属于破坏性变更，
+  升 major 并在发布说明里写清楚影响面。
+
 ## 提交规范
 
 - Conventional Commits，描述用中文：`type(scope): 中文描述`

@@ -10,6 +10,8 @@ No screenshot API is hooked. Screenshots are composited by the render server, so
 the watermark window end up in the output by construction.
 
 - Payload: 256 bit / 32 bytes — uid + Unix seconds + page name code + 96-bit HMAC
+- Version: `1.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
+  `from: "1.0.0"`, CocoaPods uses `:tag => '1.0.0'`)
 - Invisible: luma residual 0.07/255 (below the visibility threshold), chroma plane only
 - Survives JPEG: 8×8 px blocks encoded in pairs, flat inside each block; decodes at q=0.6
 - Decoding: `swift run bwdecode shot.png --auto --layout --key <hex>`, ~0.1 s for a full-screen shot
@@ -90,7 +92,7 @@ which is why the defaults are chroma + delta 8.
 ### Swift Package Manager
 
 ```swift
-.package(url: "git@github.com:zylcold/BlindWatermark.git", branch: "main")
+.package(url: "git@github.com:zylcold/BlindWatermark.git", from: "1.0.0")
 ```
 
 ```swift
@@ -121,9 +123,8 @@ pod 'BlindWatermarkCore',     :path => '/path/to/BlindWatermark'
 pod 'BlindWatermarkAutoLoad', :path => '/path/to/BlindWatermark'
 pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
 
-# Switching to a git source needs a matching tag in the repo (none exist yet, so `~> 0.1.0`
-# will fail to resolve):
-# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '0.1.0'
+# Switching to a git source: the repo has tags since 1.0.0
+# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '1.0.0'
 ```
 
 Note the podspecs declare `ios.deployment_target = '13.0'` (the repo's platform floor). Xcode 27
