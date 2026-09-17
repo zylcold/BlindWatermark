@@ -195,14 +195,24 @@ public enum BlockCodec {
         payloadBits: Int = WatermarkPayload.payloadBits,
         plane: WatermarkPlane = .chroma
     ) -> (offsetX: Int, offsetY: Int) {
+        precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
+        guard image.width >= blockSize * 2, image.height >= blockSize else { return (0, 0) }
+
+        let feature = image.featureBuffer(plane)
+        let stride = image.width + 1
+        let integral = integralImage(feature, width: image.width, height: image.height)
         var bestX = 0
         var bestY = 0
         var bestZ = -1.0
         for oy in 0..<blockSize {
             for ox in 0..<blockSize {
-                guard let d = decode(image, payloadBits: payloadBits, offsetX: ox, offsetY: oy, plane: plane) else { continue }
-                if d.medianAbsZ > bestZ {
-                    bestZ = d.medianAbsZ
+                let observation = accumulate(
+                    integral, stride, image,
+                    ox: ox, oy: oy, payloadBits: payloadBits,
+                    rowStride: 1, colStride: 1
+                )
+                if observation.medianAbsZ > bestZ {
+                    bestZ = observation.medianAbsZ
                     bestX = ox
                     bestY = oy
                 }
@@ -228,17 +238,13 @@ public enum BlockCodec {
         offsetY: Int = 0,
         plane: WatermarkPlane = .chroma
     ) -> Decoded? {
-        precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
-        guard image.width >= blockSize * 2, image.height >= blockSize else { return nil }
-
-        let feature = image.featureBuffer(plane)
-        let stride = image.width + 1
-        let integral = integralImage(feature, width: image.width, height: image.height)
-        let observation = accumulate(
-            integral, stride, image,
-            ox: offsetX, oy: offsetY, payloadBits: payloadBits,
-            rowStride: 1, colStride: 1
-        )
+        guard let observation = observe(
+            image,
+            payloadBits: payloadBits,
+            offsetX: offsetX,
+            offsetY: offsetY,
+            plane: plane
+        ) else { return nil }
         let scores = observation.scores()
         var payloadBytes = [UInt8](repeating: 0, count: (payloadBits + 7) / 8)
         for i in 0..<payloadBits where scores[i] < 0 {
@@ -265,6 +271,26 @@ public enum BlockCodec {
     /// 观测幅度下限。低于此值的 pair 一律**弃权**，不参与累加。
     /// 否则纯色背景上 `d == 0` 会被当成一个方向的观测，让无水印画面凭空拿到高置信度。
     static let minMagnitude = 0.5
+
+    private static func observe(
+        _ image: RGBAImage,
+        payloadBits: Int,
+        offsetX: Int,
+        offsetY: Int,
+        plane: WatermarkPlane
+    ) -> Observation? {
+        precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
+        guard image.width >= blockSize * 2, image.height >= blockSize else { return nil }
+
+        let feature = image.featureBuffer(plane)
+        let stride = image.width + 1
+        let integral = integralImage(feature, width: image.width, height: image.height)
+        return accumulate(
+            integral, stride, image,
+            ox: offsetX, oy: offsetY, payloadBits: payloadBits,
+            rowStride: 1, colStride: 1
+        )
+    }
 
     private struct Observation {
         var sums: [Double]
