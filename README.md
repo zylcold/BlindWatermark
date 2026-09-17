@@ -59,10 +59,10 @@ luma 模式的代价就是那 6/255 的亮度网格，凑近看得见 —— 这
 import BlindWatermark
 import BlindWatermarkCore
 
-// 服务端算好 mac 下发完整 16 字节，客户端只管渲染
+// 服务端算好 mac 下发完整 32 字节，客户端只管渲染
 Watermark.install(payload: serverIssuedBytes)
 
-// 换页时更新页面索引
+// 换页时更新页面短码
 Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
     pageClassName: type(of: self).description(), key: key).bytes)
 
@@ -70,7 +70,7 @@ Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
 Watermark.install(payload: 0xDEAD_BEEF)
 ```
 
-未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + 时间桶），开箱可跑。
+未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + Unix 秒），开箱可跑。
 
 ### CocoaPods
 
@@ -107,19 +107,24 @@ swift build -c release
 # 参数确定时（最快，74ms）
 .build/release/bwdecode shot.png --layout --pages Demo/pages.json --key <hex>
 
-# 截图被裁过 / 不确定平面与位数时
+# 截图被裁过 / 不确定平面与位数时（有 --key 用 MAC 裁决；没给 --key 只能用时间戳合理性弱校验，可靠性差一档）
 .build/release/bwdecode shot.png --auto --layout --pages Demo/pages.json --key <hex>
 
 # 打印注册表里每个类名的短码，供人工/agent 对照
 .build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
-`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转 × 2 位数种**，用 MAC 裁决，实测 0.5s。
+`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转**（位数默认只有 256，仅当显式给 `--bits` 且 ≠256 时才追加那一种），
+用 MAC 裁决，实测 0.5s。
+平面与位数已经确定、只是相位不确定时用 `--auto-offset`（`--bits` / `--plane` 照样生效）：
+给了 `--key` 才穷举块网格相位 × tile 旋转；没给 `--key` 只穷举块网格相位、rotation 恒 0。
+它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。没给 `--key` 时它只能按 `|z|` 中位裁决，
+**不保证解出正确载荷**，判读必须看 `弱bit`。
 
 必须搜 tile 旋转的原因：裁掉非 256 整数倍的内容会让图案 tile 原点相对图片平移，
 `localPairIndex` 整体位移，载荷表现为**旋转**（裁 137px → 旋转 32 bit）。
 相位搜索只修块对齐（mod 8），修不了这个平移 —— 只搜相位时载荷旋转且自洽，
-`|z|` 中位照样 98、弱 bit 0/128，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
+`|z|` 中位照样很高、弱 bit 0/256，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
 
 判读顺序也是这么定的：阶段一按 `|z|` 排出块对齐最好的 16 组，阶段二在这些组上穷举旋转并逐个验 MAC。
 不能按 `signal` 排 —— 它被内容撑大，没水印的 luma 平面能拿 19，带水印的 chroma 才 9，会挑错平面。
@@ -134,7 +139,7 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 
 ```
 OK   弱 bit = 0            每 bit 都显著，结论可信
-WEAK 弱 bit <= 32/8 = 4    勉强解出，结论要交叉验证
+WEAK 弱 bit <= payloadBits/8    勉强解出，结论要交叉验证（256 bit 时阈值 = 32）
 NO   弱 bit 更多           画面里大概没有水印
 ```
 
@@ -144,20 +149,32 @@ Agent 用法见 [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL
 
 ## 默认 payload 布局
 
+`WatermarkPayload.payloadBits` = 256 bit / 32 字节，字段全小端。
+`Sources/BlindWatermarkCore/WatermarkPayload.swift` 的文档注释是唯一权威，这里是副本：
+
 ```
-高 16 位 = FNV-1a(identifierForVendor) & 0xFFFF   // 设备哈希，不可逆，需查表
-低 16 位 = floor(unixTime / 600) & 0xFFFF          // 时间桶，粒度 10 分钟
+[255:224] uid        32   UInt32   用户 ID 原样放
+[223:192] timestamp  32   UInt32   Unix 秒，精确到秒
+[191:128] pageCode   64   UInt64   页面类名短码，10 个 6-bit 字符 = 60 bit
+[127: 96] tag        32   UInt32   [31:28] 布局版本 [27:20] App [19:12] 环境 [11:0] 保留
+[ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断到 96 bit
 ```
 
-时间桶 16 bit 每 `65536 × 600s ≈ 455 天` 环绕一次。
+**为什么是 256 bit**：10 字符页面短码就要 60 bit，128 bit 装不下；再大每 tile 的重复次数会低于 2，
+「隔一份翻转极性抵消亮度梯度」的机制就失效了（上限见 `BlockCodec.maxPayloadBits`）。
 
-这是 POC 级布局：无法验签、可伪造、设备哈希不可逆。**上生产必须换成服务端下发并签名的 payload**，
-否则拿到水印也定位不到人，还可能被伪造栽赃。
+零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）用 `WatermarkDefaultPayload.currentBytes()`
+拼一个 **256 bit 推荐布局**（不是旧的 32 bit POC 布局）：uid = `fnv1a(identifierForVendor.uuidString)` 的
+完整 32 bit，timestamp = 当前 Unix 秒（**没有 10 分钟时间桶**），pageCode = 0，tag = `layoutVersion << 28`，mac 留空。
+`mac` 为空 ⇒ **无法验签、可伪造**，设备哈希不可逆，只够跑通链路。
+**上生产必须换成服务端下发并签名的 payload**，否则拿到水印也定位不到人，还可能被伪造栽赃。
 
 ## 已验证 / 未验证
 
-`swift test` 覆盖（11 例）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
-JPEG q=0.8 与 q=0.6、局部裁剪、`delta = 2` 下限、无水印画面不误报。
+`swift test` 覆盖（40 例，macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+JPEG q=0.8 与 q=0.6、局部裁剪、`delta = 2` 下限、无水印画面不误报、tile 几何契约、
+chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
+256 bit 布局回环与 MAC 篡改检测、`findBestOffset` 相位搜索（校验器裁决）以及 PageRegistry / PageNameCodec。
 
 **模拟器逐页实测**（`Demo/`，iPhone 16，每页 payload 均为 0xDEADBEEF）：
 

@@ -39,7 +39,8 @@ public enum Watermark {
 
     /// 换页面时重画图案。相位不变，解码端无感；生成一张 tile 是微秒级，导航时随手调。
     ///
-    ///     Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts, pageIndex: 3, ...).bytes)
+    ///     Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
+    ///         pageClassName: type(of: self).description(), key: key).bytes)
     public static func update(payload: [UInt8], payloadBits: Int? = nil) {
         WatermarkState.shared.configure(
             payload: payload,
@@ -62,7 +63,8 @@ public enum Watermark {
         install(payload: bytes, payloadBits: payloadBits, delta: delta, plane: plane)
     }
 
-    /// 零接入模式下的 payload 来源。默认用 `identifierForVendor` + 时间桶拼一个 32 位值。
+    /// 零接入模式下的 payload 来源。默认用 `identifierForVendor` 哈希 + Unix 秒
+    /// 拼一个 256 bit 推荐布局（`WatermarkDefaultPayload.currentBytes()`）。
     ///
     /// 生产环境应当换掉：payload 需要服务端下发并签名，客户端不要持有明文映射表。
     public static var payloadProvider: (() -> [UInt8])? {
@@ -136,7 +138,7 @@ final class WatermarkState {
             guard let scene = note.object as? UIScene else { return }
             self?.windows.removeValue(forKey: ObjectIdentifier(scene))
         })
-        // 时间桶会变，回前台时按新 payload 重画
+        // 载荷里的时间戳会变，回前台时按新 payload 重画
         observerTokens.append(center.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil,

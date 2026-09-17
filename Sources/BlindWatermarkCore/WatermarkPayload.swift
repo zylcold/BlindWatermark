@@ -100,19 +100,12 @@ public struct WatermarkPayload: Equatable {
     }
 
     public var bytes: [UInt8] {
-        var out = [UInt8]()
-        out.append(contentsOf: [
-            UInt8(uid & 0xFF), UInt8((uid >> 8) & 0xFF), UInt8((uid >> 16) & 0xFF), UInt8((uid >> 24) & 0xFF),
-        ])
-        out.append(contentsOf: [
-            UInt8(timestamp & 0xFF), UInt8((timestamp >> 8) & 0xFF),
-            UInt8((timestamp >> 16) & 0xFF), UInt8((timestamp >> 24) & 0xFF),
-        ])
-        for i in 0..<8 { out.append(UInt8((pageCode >> (8 * UInt64(i))) & 0xFF)) }
-        out.append(contentsOf: [
-            UInt8(tag & 0xFF), UInt8((tag >> 8) & 0xFF),
-            UInt8((tag >> 16) & 0xFF), UInt8((tag >> 24) & 0xFF),
-        ])
+        var out = WatermarkPayload.signedBody(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: pageCode,
+            tag: tag
+        )
         var macBytes = mac
         if macBytes.count < WatermarkPayload.macByteCount {
             macBytes.append(contentsOf: [UInt8](
@@ -154,15 +147,32 @@ public struct WatermarkPayload: Equatable {
         tag: UInt32,
         key: SymmetricKey
     ) -> [UInt8] {
-        let body = WatermarkPayload(
-            uid: uid,
-            timestamp: timestamp,
-            pageCode: pageCode,
-            tag: tag,
-            mac: []
-        ).bytes.prefix(signedByteCount)
+        let body = signedBody(uid: uid, timestamp: timestamp, pageCode: pageCode, tag: tag)
         let code = HMAC<SHA256>.authenticationCode(for: Data(body), using: key)
         return Array([UInt8](code).prefix(macByteCount))
+    }
+
+    /// 前 20 字节的规范编码（小端，`pageCode` 高 4 位归零）。
+    ///
+    /// `bytes` 与 `mac` 共用这一份，避免两条路径各写一遍字段布局而悄悄漂移
+    /// （曾经 `mac` 手搓 body 时漏了 `pageCode` mask，与 `init` / `isValid` 分叉）。
+    private static func signedBody(uid: UInt32, timestamp: UInt32, pageCode: UInt64, tag: UInt32) -> [UInt8] {
+        var body = [UInt8]()
+        body.reserveCapacity(signedByteCount)
+        body.append(contentsOf: [
+            UInt8(uid & 0xFF), UInt8((uid >> 8) & 0xFF), UInt8((uid >> 16) & 0xFF), UInt8((uid >> 24) & 0xFF),
+        ])
+        body.append(contentsOf: [
+            UInt8(timestamp & 0xFF), UInt8((timestamp >> 8) & 0xFF),
+            UInt8((timestamp >> 16) & 0xFF), UInt8((timestamp >> 24) & 0xFF),
+        ])
+        let code = pageCode & 0x0FFF_FFFF_FFFF_FFFF
+        for i in 0..<8 { body.append(UInt8((code >> (8 * UInt64(i))) & 0xFF)) }
+        body.append(contentsOf: [
+            UInt8(tag & 0xFF), UInt8((tag >> 8) & 0xFF),
+            UInt8((tag >> 16) & 0xFF), UInt8((tag >> 24) & 0xFF),
+        ])
+        return body
     }
 }
 

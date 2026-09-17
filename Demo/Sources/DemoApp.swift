@@ -18,7 +18,7 @@ struct DemoApp: App {
     }
 }
 
-/// 演示 128 bit 推荐布局：uid + Unix 秒 + 页面索引 + 标签 + mac。
+/// 演示 256 bit 推荐布局：uid + Unix 秒 + 页面短码 + 标签 + mac。
 /// 换页时用 `Watermark.update` 重画图案 —— 相位不变，解码端无感。
 enum DemoWatermark {
     static let keyHex = "00112233445566778899aabbccddeeff"
@@ -95,7 +95,7 @@ enum DemoPage: String, CaseIterable, Identifiable {
     }
 }
 
-/// 页脚：把打进去的 uid / 页面索引亮出来，方便肉眼核对解码结果
+/// 页脚：把打进去的 uid / 页面短码亮出来，方便肉眼核对解码结果
 struct PayloadFooter: View {
     let page: DemoPage
 
@@ -124,7 +124,7 @@ struct RootView: View {
         }
         .onAppear {
             DemoWatermark.install(page: selection)
-            selection = selection   // 触发一次 onChange，确保首屏也带页面索引
+            selection = selection   // 触发一次 onChange，确保首屏也带页面短码
         }
         .onChange(of: selection) { page in
             DemoWatermark.update(page: page)

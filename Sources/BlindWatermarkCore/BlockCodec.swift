@@ -57,6 +57,9 @@ public enum BlockCodec {
     public static let pairsPerTile = pairsPerRow * blockRowsPerTile
     /// 载荷上限（bit）。再大每 tile 重复次数会低于 2，翻转极性就没戏了
     public static let maxPayloadBits = 256
+    /// 第二阶段会对入围相位继续做 tile 旋转穷举；保留 16 组足够覆盖常见退化相位，
+    /// 同时把 64×512×位数 的最坏开销压在可接受范围内。
+    static let maxPhaseFinalists = 16
 
     public struct Decoded: Equatable {
         /// 解出的载荷，小端按 bit 打包，长度 = ceil(payloadBits / 8)
@@ -179,6 +182,57 @@ public enum BlockCodec {
 
     // MARK: - 解码
 
+    /// 只搜索块网格相位（`0..<blockSize`）。
+    ///
+    /// 给只知道截图被裁过、但其余参数（平面 / 位数）已经确定的调用方用。
+    /// 特征图与积分图只算一次；64 个候选相位只重复廉价的累加与折叠。
+    /// 注意它只修块对齐，**修不了**裁剪造成的 tile 平移（那要 `fold` 的 rotation，见 `decodeBest`）。
+    ///
+    /// 裁决规则：
+    /// - 给了 `validate`（通常是 MAC 校验）：在**通过校验**的候选里取 `medianAbsZ` 最高的那一组。
+    /// - 一个都没通过校验，或没给 `validate`：退回 `medianAbsZ` 最高的那一组 ——
+    ///   这个返回值只代表「块对齐得最好」，**不保证解出正确载荷**：错位相位在低变化画面上
+    ///   同样能给出高 `|z|` 的自洽结果（见 `BlockCodec` 类型文档）。调用方必须自己 MAC 验证，
+    ///   或至少按 `weakBits` 如实报 WEAK / NO。
+    public static func findBestOffset(
+        in image: RGBAImage,
+        payloadBits: Int = WatermarkPayload.payloadBits,
+        plane: WatermarkPlane = .chroma,
+        validate: ((Decoded) -> Bool)? = nil
+    ) -> (offsetX: Int, offsetY: Int) {
+        precondition((1...maxPayloadBits).contains(payloadBits), "payloadBits 必须在 1...\(maxPayloadBits)")
+        guard let feature = featureAndIntegral(image, plane) else { return (0, 0) }
+
+        var bestOffset = (offsetX: 0, offsetY: 0)
+        var bestScore = -Double.infinity
+        var validated: (offset: (offsetX: Int, offsetY: Int), score: Double)?
+
+        for oy in 0..<blockSize {
+            for ox in 0..<blockSize {
+                let stats = accumulate(feature, image, ox: ox, oy: oy)
+                let folded = fold(stats, payloadBits: payloadBits)
+                if folded.medianAbsZ > bestScore {
+                    bestScore = folded.medianAbsZ
+                    bestOffset = (ox, oy)
+                }
+                guard let validate else { continue }
+                let candidate = makeDecoded(
+                    folded,
+                    payloadBits: payloadBits,
+                    plane: plane,
+                    ox: ox,
+                    oy: oy
+                )
+                guard validate(candidate) else { continue }
+                if validated == nil || folded.medianAbsZ > validated!.score {
+                    validated = ((ox, oy), folded.medianAbsZ)
+                }
+            }
+        }
+        // 相位按 oy 外层、ox 内层顺序遍历，`>` 而非 `>=`，所以同分时取先遇到的，结果可复现
+        return validated?.offset ?? bestOffset
+    }
+
     /// 从整屏截图解码，参数全部显式给定。
     ///
     /// 相位默认 (0, 0)：水印层铺在窗口原点，整屏截图的图案原点就是图片原点。
@@ -247,7 +301,7 @@ public enum BlockCodec {
         }
         guard !scored.isEmpty else { return nil }
         scored.sort { $0.score > $1.score }
-        let finalists = scored.prefix(min(scored.count, 16)).map(\.context)
+        let finalists = scored.prefix(min(scored.count, maxPhaseFinalists)).map(\.context)
 
         let rotations = searchTile ? Array(0..<pairsPerTile) : [0]
 
@@ -272,8 +326,11 @@ public enum BlockCodec {
         // 唯一可靠的裁决是 MAC —— 所以校验器通过即返回，不按分数排序。
         for context in finalists {
             for bits in bitsList {
-                for rotation in rotations where validate(decode(context, bits: bits, rotation: rotation)) {
-                    return decode(context, bits: bits, rotation: rotation)
+                for rotation in rotations {
+                    let candidate = decode(context, bits: bits, rotation: rotation)
+                    if validate(candidate) {
+                        return candidate
+                    }
                 }
             }
         }
