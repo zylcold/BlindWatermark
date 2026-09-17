@@ -121,7 +121,7 @@ The check value lives in the 96-bit `mac` field and has three flavours:
 
 | Constructed with | Field content | Decoder side |
 |---|---|---|
-| `WatermarkPayload(… key:)` | HMAC-SHA256(first 20 bytes, server key) | with a key → `mac=OK(验签)`; without → `mac=未校验(需要 --key)` |
+| `WatermarkPayload(… key:)` | HMAC-SHA256(first 52 bytes, server key) | with a key → `mac=OK(验签)`; without → `mac=未校验(需要 --key)`, and **crop recovery is unavailable** |
 | `WatermarkPayload.selfChecked(…)` | SHA-256(first 20 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
 | `mac: []` / all zeros | no check value | `mac=未签名`; cropping search falls back to the structural check |
 
@@ -403,7 +403,7 @@ The `mac` field is reported in tiers (end of the second `--layout` line):
 | `mac=OK(验签)` | HMAC verified — account/time trustworthy and unforged |
 | `mac=OK(自检,未验签)` | public self-check passed — proves "decoded correctly", **not** "not forged" |
 | `mac=未签名(字段自洽,退结构自检)` | payload carries no check value; crop conclusions unreliable |
-| `mac=未校验(需要 --key)` | HMAC-signed payload but no key given |
+| `mac=未校验(需要 --key)` | HMAC-signed payload but no key given — such a payload **cannot** be searched for crop/rotation (no arbiter); get the key, or have the sender embed the public self-check value |
 | `mac=BAD(密钥不符或载荷被改)` | key given and neither check matches |
 
 When validating an integration with different layouts, run `Demo/sweep.sh` and re-measure instead
