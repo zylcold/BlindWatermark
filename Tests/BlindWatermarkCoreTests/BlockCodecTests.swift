@@ -396,19 +396,104 @@ final class WatermarkPayloadTests: XCTestCase {
         XCTAssertEqual(restored.mac, payload.mac)
     }
 
-    func testFindBestOffsetReturnsCorrectPhase() throws {
-        let payload: UInt32 = 0xCAFE_BABE
-        let ox = 3, oy = 5
+    /// 给 MAC 校验器时，`findBestOffset` 必须返回一个能解出原载荷的相位。
+    ///
+    /// 平坦底色上「块对齐最好」的相位不止一个（错位相位把相邻块按同一比例线性混合，符号照样保住），
+    /// 所以这里只断言解出来的东西 MAC 通过、字段原样 —— 这正是校验器存在的意义，不断言唯一相位。
+    func testFindBestOffsetWithMACValidatorReturnsCorrectPhase() throws {
+        let key = try makeKey()
+        let payload = WatermarkPayload(
+            uid: 0x0BAD_F00D,
+            timestamp: 1_765_123_456,
+            pageClassName: "BHProfileViewController",
+            app: 3,
+            key: key
+        )
         var base = RGBAImage(width: 640, height: 900)
         base.fill((180, 180, 180, 255))
-        let tile = BlockCodec.makeTile(payload: payload, payloadBits: 32)
-        base.blendTiled(tile, dx: ox, dy: oy)
+        base.blendTiled(BlockCodec.makeTile(payload: payload.bytes), dx: 3, dy: 5)
 
-        let best = BlockCodec.findBestOffset(in: base, payloadBits: 32)
+        // 真校验：MAC 通过就说明相位可用、载荷也是原样解回的，不是拿答案去比答案
+        func validatesMAC(_ decoded: BlockCodec.Decoded) -> Bool {
+            guard decoded.payloadBits == WatermarkPayload.payloadBits,
+                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+            return fields.isValid(key: key)
+        }
+
+        let best = BlockCodec.findBestOffset(in: base, validate: validatesMAC)
+        XCTAssertTrue((0..<BlockCodec.blockSize).contains(best.offsetX))
+        XCTAssertTrue((0..<BlockCodec.blockSize).contains(best.offsetY))
+
         let result = try XCTUnwrap(
-            BlockCodec.decode(base, payloadBits: 32, offsetX: best.offsetX, offsetY: best.offsetY)
+            BlockCodec.decode(base, offsetX: best.offsetX, offsetY: best.offsetY)
         )
-        XCTAssertEqual(result.payload, payload)
+        XCTAssertTrue(validatesMAC(result), "选出的相位必须解出 MAC 通过的载荷")
+        XCTAssertEqual(WatermarkPayload(bytes: result.payloadBytes), payload)
+    }
+
+    /// 校验器是**用来筛相位的**，不是摆设：只有 `oy == 5` 的相位通过时，
+    /// 返回值必须落在 `oy == 5` 里，而不是裸 `medianAbsZ` argmax 的那一组。
+    func testFindBestOffsetHonorsValidator() throws {
+        let payload = WatermarkPayload(
+            uid: 0x0BAD_F00D,
+            timestamp: 1_765_123_456,
+            pageClassName: "BHProfileViewController",
+            app: 3,
+            key: try makeKey()
+        )
+        var base = RGBAImage(width: 640, height: 900)
+        base.fill((180, 180, 180, 255))
+        base.blendTiled(BlockCodec.makeTile(payload: payload.bytes), dx: 3, dy: 5)
+
+        // 前提：裸 argmax 选的不是 oy == 5。不成立这条测试就没意义，所以先断言前提。
+        let unfiltered = BlockCodec.findBestOffset(in: base)
+        XCTAssertNotEqual(unfiltered.offsetY, 5, "前提失效：裸 argmax 已经落在 oy == 5")
+
+        let filtered = BlockCodec.findBestOffset(in: base, validate: { $0.offsetY == 5 })
+        XCTAssertEqual(filtered.offsetY, 5)
+
+        // 在通过校验的那一行里，仍是 |z| 中位最高的那个
+        var rowBest = (offsetX: 0, offsetY: 5)
+        var rowScore = -Double.infinity
+        for ox in 0..<BlockCodec.blockSize {
+            let decoded = try XCTUnwrap(BlockCodec.decode(base, offsetX: ox, offsetY: 5))
+            if decoded.medianAbsZ > rowScore {
+                rowScore = decoded.medianAbsZ
+                rowBest = (ox, 5)
+            }
+        }
+        XCTAssertEqual(filtered.offsetX, rowBest.offsetX)
+    }
+
+    /// 不传 `validate` 时 `findBestOffset` 就是纯 `medianAbsZ` argmax（含同分先到先得的顺序），
+    /// 只保证块对齐最好 —— 这正是它必须配校验器用的原因，也是这条性质不能丢的原因。
+    func testFindBestOffsetWithoutValidatorIsPureArgmax() throws {
+        let payload = WatermarkPayload(
+            uid: 0x0BAD_F00D,
+            timestamp: 1_765_123_456,
+            pageClassName: "BHProfileViewController",
+            app: 3,
+            key: try makeKey()
+        )
+        var base = RGBAImage(width: 640, height: 900)
+        base.fill((180, 180, 180, 255))
+        base.blendTiled(BlockCodec.makeTile(payload: payload.bytes), dx: 3, dy: 5)
+
+        var expected = (offsetX: 0, offsetY: 0)
+        var bestScore = -Double.infinity
+        for oy in 0..<BlockCodec.blockSize {
+            for ox in 0..<BlockCodec.blockSize {
+                let decoded = try XCTUnwrap(BlockCodec.decode(base, offsetX: ox, offsetY: oy))
+                if decoded.medianAbsZ > bestScore {
+                    bestScore = decoded.medianAbsZ
+                    expected = (ox, oy)
+                }
+            }
+        }
+
+        let best = BlockCodec.findBestOffset(in: base)
+        XCTAssertEqual(best.offsetX, expected.offsetX)
+        XCTAssertEqual(best.offsetY, expected.offsetY)
     }
 }
 
