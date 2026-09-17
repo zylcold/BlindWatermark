@@ -6,24 +6,27 @@ Pod::Spec.new do |s|
     覆盖 App 全部界面的低幅度亮度扰动层，肉眼不可见，截图必然被带上。
     每 16x16 像素块成对差分编码 1 bit，解码只看亮度差的符号，与底色无关，抗 JPEG。
   DESC
-  s.homepage         = 'https://example.com/BlindWatermark'
+  s.homepage         = 'https://github.com/zylcold/BlindWatermark'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
   s.author           = { 'lovelink' => 'dev@example.com' }
-  s.source           = { :git => 'https://example.com/BlindWatermark.git', :tag => s.version.to_s }
+  s.source           = { :git => 'https://github.com/zylcold/BlindWatermark.git', :tag => s.version.to_s }
 
   s.ios.deployment_target = '13.0'
   s.swift_version         = '5.9'
 
-  # 本地联调：pod 'BlindWatermark', :path => '/Users/zhuyunlong/DevSource/BlindWatermark'
-  s.source_files = [
-    'Sources/BlindWatermarkCore/**/*.swift',
-    'Sources/BlindWatermark/**/*.swift',
-    'Sources/BlindWatermarkAutoLoad/**/*.{h,m}',
-  ]
+  # CocoaPods 下三个 target 拆成三个独立 podspec，模块名与 SPM 保持一致：
+  #   BlindWatermarkCore    — 编解码核心
+  #   BlindWatermarkAutoLoad — ObjC +load 自动挂载
+  #   BlindWatermark        — Swift UI 层（本 podspec）
+  # 本地联调：pod 'BlindWatermark', :path => '.'
+  s.source_files = 'Sources/BlindWatermark/**/*.swift'
+
+  s.dependency 'BlindWatermarkCore',     '~> 0.1.0'
+  s.dependency 'BlindWatermarkAutoLoad', '~> 0.1.0'
+
   s.frameworks = 'UIKit', 'CoreGraphics'
 
   s.pod_target_xcconfig = {
-    # 水印层与业务无耦合，但 ObjC 自动加载目标文件需要被链接进来
     'DEFINES_MODULE' => 'YES',
   }
 end
