@@ -31,7 +31,7 @@ TILE = 256  # 平铺周期（设备像素）
 PAIRS_PER_ROW = TILE // BLOCK // 2  # 16
 BLOCK_ROWS_PER_TILE = TILE // BLOCK  # 32
 PAIRS_PER_TILE = PAIRS_PER_ROW * BLOCK_ROWS_PER_TILE  # 512
-MAX_PAYLOAD_BITS = 256
+MAX_PAYLOAD_BITS = 512
 MAX_PHASE_FINALISTS = 16
 
 # 低于此方差的观测按此方差算，避免纯色画面上 z 值除以 0 而爆掉
@@ -41,11 +41,14 @@ MIN_MAGNITUDE = 0.5
 # |z| 小于它就认为该 bit 证据不足
 WEAK_Z = 3.0
 
-PAYLOAD_BITS = 256
-PAYLOAD_BYTE_COUNT = 32
-LAYOUT_VERSION = 3
+PAYLOAD_BITS = 512
+PAYLOAD_BYTE_COUNT = 64
+LAYOUT_VERSION = 4
 MAC_BYTE_COUNT = 12
-SIGNED_BYTE_COUNT = 20
+# 校验值覆盖前 52 字节（uid + timestamp + build + pageCode + tag + note）
+SIGNED_BYTE_COUNT = 52
+PAGE_CODE_BYTE_COUNT = 12
+NOTE_BYTE_COUNT = 22
 # 结构自检认定的合理时间戳区间：2015-01-01 ... 2100-01-01
 PLAUSIBLE_TIMESTAMP = (1_420_070_400, 4_102_444_800)
 
@@ -55,7 +58,7 @@ SUFFIX_LADDER = [
 ]
 KNOWN_PREFIXES = ["BH", "JY", "LL", "HW", "XQ"]
 CODE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_"
-CODE_LENGTH = 10
+CODE_LENGTH = 15
 PAD_CHARACTER = "_"
 
 
@@ -355,44 +358,60 @@ def decode_best(image: np.ndarray, payload_bits_candidates=None, planes=("chroma
     return build(finalists[0], bits_list[0], 0)
 
 
-# MARK: - 载荷布局与校验
+# MARK: - 载荷布局与校验（layout v4：512 bit / 64 字节）
 
 
 def _u32_le(value: int) -> bytes:
     return int(value & 0xFFFFFFFF).to_bytes(4, "little")
 
 
-def signed_body(uid: int, timestamp: int, page_code: int, tag: int) -> bytes:
-    """前 20 字节的规范编码（小端，pageCode 高 4 位归零）。"""
+def signed_body(uid: int, timestamp: int, build: int, page_code: bytes, tag: int,
+                note: bytes) -> bytes:
+    """校验值覆盖的前 52 字节：uid(4) + timestamp(4) + build(8) + pageCode(12) + tag(2) + note(22)。
+
+    v4 没有版本位 —— 布局就是这一个，字段边界变了等于换协议（v3 的 256 bit 布局已废弃）。
+    """
     body = _u32_le(uid) + _u32_le(timestamp)
-    body += int(page_code & 0x0FFFFFFFFFFFFFFF).to_bytes(8, "little")
-    body += _u32_le(tag)
+    body += int(build & 0xFFFFFFFFFFFFFFFF).to_bytes(8, "little")
+    body += _pad(page_code, PAGE_CODE_BYTE_COUNT)
+    body += bytes([(tag >> 8) & 0xFF, tag & 0xFF])
+    body += _pad(note, NOTE_BYTE_COUNT)
     assert len(body) == SIGNED_BYTE_COUNT
     return body
 
 
-def payload_mac(uid: int, timestamp: int, page_code: int, tag: int, key: bytes) -> bytes:
-    """前 20 字节的 HMAC-SHA256 截断到 96 bit。"""
-    return hmac.new(key, signed_body(uid, timestamp, page_code, tag), hashlib.sha256).digest()[:MAC_BYTE_COUNT]
+def _pad(data: bytes, size: int) -> bytes:
+    return bytes(data[:size]).ljust(size, b"\x00")
 
 
-def self_check(uid: int, timestamp: int, page_code: int, tag: int) -> bytes:
-    """公开自检值：SHA-256(前 20 字节) 截断到 96 bit，与 mac 同位。
+def self_check(uid: int, timestamp: int, build: int, page_code: bytes, tag: int,
+               note: bytes) -> bytes:
+    """公开自检值：SHA-256(前 52 字节) 截断到 96 bit，与校验值字段同位。
 
     无密钥部署用它代替 HMAC：任何一位不同都过不了，所以能拦住"对齐错了几个 bit"的近似解。
     但拦不住伪造（谁都能算）—— 自检通过只证明"解对了"，不证明"没被改"。
     """
-    return hashlib.sha256(signed_body(uid, timestamp, page_code, tag)).digest()[:MAC_BYTE_COUNT]
+    return hashlib.sha256(signed_body(uid, timestamp, build, page_code, tag, note)).digest()[:MAC_BYTE_COUNT]
+
+
+def payload_mac(uid: int, timestamp: int, build: int, page_code: bytes, tag: int,
+                note: bytes, key: bytes) -> bytes:
+    """HMAC-SHA256(前 52 字节, 服务端密钥) 截断到 96 bit。"""
+    return hmac.new(key, signed_body(uid, timestamp, build, page_code, tag, note),
+                    hashlib.sha256).digest()[:MAC_BYTE_COUNT]
 
 
 class Payload:
-    """256 bit 推荐布局：uid + Unix 秒 + 页面短码 + tag + 96 bit mac，字段全小端。"""
+    """layout v4：uid + Unix 秒 + build + 20 字符页面短码 + note + 96 bit 校验值。"""
 
-    def __init__(self, uid: int, timestamp: int, page_code: int, tag: int, mac: bytes):
+    def __init__(self, uid: int, timestamp: int, build: int, page_code: bytes, tag: int,
+                 note: bytes, mac: bytes):
         self.uid = uid
         self.timestamp = timestamp
-        self.page_code = page_code & 0x0FFFFFFFFFFFFFFF
-        self.tag = tag
+        self.build = build
+        self.page_code = _pad(page_code, PAGE_CODE_BYTE_COUNT)
+        self.tag = tag & 0xFFFF
+        self.note_bytes = _pad(note, NOTE_BYTE_COUNT)
         self.mac = mac
 
     @classmethod
@@ -402,51 +421,64 @@ class Payload:
         return cls(
             uid=int.from_bytes(raw[0:4], "little"),
             timestamp=int.from_bytes(raw[4:8], "little"),
-            page_code=int.from_bytes(raw[8:16], "little"),
-            tag=int.from_bytes(raw[16:20], "little"),
-            mac=raw[20:32],
+            build=int.from_bytes(raw[8:16], "little"),
+            page_code=raw[16:28],
+            tag=(raw[28] << 8) | raw[29],
+            note=raw[30:52],
+            mac=raw[52:64],
         )
 
     @classmethod
-    def build(cls, uid: int, timestamp: int, page_class_name: str,
-              app: int = 0, environment: int = 0, key: bytes = b"") -> "Payload":
-        tag = (LAYOUT_VERSION << 28) | ((app & 0xFF) << 20) | ((environment & 0xFF) << 12)
+    def build_payload(cls, uid: int, timestamp: int, build: int, page_class_name: str,
+                      note: str = "", app: int = 0, environment: int = 0,
+                      key: bytes | None = None) -> "Payload":
+        """`key` 为 None 时校验值填公开自检值（无密钥部署）。"""
         page_code = encode_page_code(page_name_code(page_class_name))
-        return cls(uid, timestamp, page_code, tag,
-                   payload_mac(uid, timestamp, page_code, tag, key))
-
-    @classmethod
-    def self_checked(cls, uid: int, timestamp: int, page_class_name: str,
-                     app: int = 0, environment: int = 0) -> "Payload":
-        """无密钥场景：mac 位置放公开自检值。"""
-        tag = (LAYOUT_VERSION << 28) | ((app & 0xFF) << 20) | ((environment & 0xFF) << 12)
-        page_code = encode_page_code(page_name_code(page_class_name))
-        return cls(uid, timestamp, page_code, tag, self_check(uid, timestamp, page_code, tag))
+        tag = ((app & 0xFF) << 8) | (environment & 0xFF)
+        note_bytes = note.encode("utf-8")
+        if key is None:
+            check = self_check(uid, timestamp, build, page_code, tag, note_bytes)
+        else:
+            check = payload_mac(uid, timestamp, build, page_code, tag, note_bytes, key)
+        return cls(uid, timestamp, build, page_code, tag, note_bytes, check)
 
     @property
-    def layout_version(self) -> int:
-        return self.tag >> 28
+    def bytes(self) -> bytes:
+        return signed_body(self.uid, self.timestamp, self.build, self.page_code,
+                           self.tag, self.note_bytes) + _pad(self.mac, MAC_BYTE_COUNT)
 
     @property
     def app(self) -> int:
-        return (self.tag >> 20) & 0xFF
+        return (self.tag >> 8) & 0xFF
 
     @property
     def environment(self) -> int:
-        return (self.tag >> 12) & 0xFF
+        return self.tag & 0xFF
 
     @property
     def page_name_code(self) -> str:
         return decode_page_code(self.page_code)
 
+    @property
+    def note(self) -> str | None:
+        try:
+            return self.note_bytes.rstrip(b"\x00").decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+    @property
+    def build_number(self) -> str:
+        return "" if self.build == 0 else f"{self.build:012d}"
+
     def is_valid(self, key: bytes) -> bool:
-        expected = payload_mac(self.uid, self.timestamp, self.page_code, self.tag, key)
+        expected = payload_mac(self.uid, self.timestamp, self.build, self.page_code,
+                               self.tag, self.note_bytes, key)
         # 定长比较，不做短路
         return len(self.mac) == len(expected) and hmac.compare_digest(bytes(self.mac), expected)
 
     @property
     def is_unsigned(self) -> bool:
-        """mac 全 0：载荷没带任何校验值。"""
+        """校验值全 0：载荷没带任何校验值。"""
         return all(byte == 0 for byte in self.mac)
 
     def verification(self, key: bytes | None) -> str:
@@ -458,29 +490,41 @@ class Payload:
             return "unsigned"
         if key is not None and self.is_valid(key):
             return "signed"
-        if bytes(self.mac) == self_check(self.uid, self.timestamp, self.page_code, self.tag):
+        if bytes(self.mac) == self_check(self.uid, self.timestamp, self.build,
+                                         self.page_code, self.tag, self.note_bytes):
             return "selfCheck"
         return "failed"
 
     @property
     def is_plausible(self) -> bool:
-        """结构自检：只看布局本身的结构约束，不需密钥也不靠额外字段。
+        """结构自检：时间戳合理 + build 日历合法 + note 是 UTF-8 + 20 个字符都在 37 符号表内。
 
-        名义判别力 ≈ 28 bit，但**实测仍会放过近似解**（半块相位错位解出的是真载荷改几个 bit
-        的拷贝，结构字段根本没动），所以只能当"没有任何校验值时的兵底"。
+        判别力比"没有校验值"强，但**实测仍会放过近似解**（半块相位错位解出的是真载荷改几个 bit
+        的拷贝，结构字段根本没动），所以只能当兵底。
         """
-        if self.layout_version != LAYOUT_VERSION:
-            return False
-        if self.tag & 0x0FFF:
-            return False
-        if self.page_code >> 60:
-            return False
         if not PLAUSIBLE_TIMESTAMP[0] <= self.timestamp <= PLAUSIBLE_TIMESTAMP[1]:
             return False
-        return all(((self.page_code >> (6 * i)) & 0x3F) < len(CODE_ALPHABET) for i in range(CODE_LENGTH))
+        if self.note is None:
+            return False
+        if not plausible_build(self.build):
+            return False
+        return validate_page_code(self.page_code)
 
 
-# MARK: - 页面短码
+def plausible_build(build: int) -> bool:
+    """build = 0（未填）或日历上合法的 12 位 YYYYMMDDHHMM。"""
+    if build == 0:
+        return True
+    digits = str(build)
+    if len(digits) != 12 or not digits.isdigit():
+        return False
+    year, month, day = int(digits[0:4]), int(digits[4:6]), int(digits[6:8])
+    hour, minute = int(digits[8:10]), int(digits[10:12])
+    return 2000 <= year <= 2099 and 1 <= month <= 12 and 1 <= day <= 31 \
+        and 0 <= hour <= 23 and 0 <= minute <= 59
+
+
+# MARK: - 页面短码（20 字符 = 120 bit）
 
 
 def normalized_stem(class_name: str) -> str:
@@ -503,35 +547,66 @@ def normalized_stem(class_name: str) -> str:
     return "".join(ch for ch in name.lower() if ch.isascii() and ch.isalnum())
 
 
-def page_name_code(class_name: str) -> str:
+def page_name_code(class_name: str, length: int = CODE_LENGTH) -> str:
     """类名 → 短码，去掉尾部补位符，保证 `decode(encode(code)) == code`。"""
-    characters = list(normalized_stem(class_name)[:CODE_LENGTH])
-    while len(characters) < CODE_LENGTH:
+    characters = list(normalized_stem(class_name)[:length])
+    while len(characters) < length:
         characters.append(PAD_CHARACTER)
     while characters and characters[-1] == PAD_CHARACTER:
         characters.pop()
     return "".join(characters)
 
 
-def encode_page_code(code: str) -> int:
-    characters = list(code[:CODE_LENGTH])
-    while len(characters) < CODE_LENGTH:
+def encode_page_code(code: str, length: int = CODE_LENGTH) -> bytes:
+    """短码 → 小端字节（每字符 6 bit，低位在前）。20 字符 → 15 字节。"""
+    characters = list(code[:length])
+    while len(characters) < length:
         characters.append(PAD_CHARACTER)
-    value = 0
+    out = bytearray((length * 6 + 7) // 8)
     for position, character in enumerate(characters):
         index = CODE_ALPHABET.find(character)
-        value |= (index if index >= 0 else len(CODE_ALPHABET) - 1) << (6 * position)
-    return value
+        if index < 0:
+            index = len(CODE_ALPHABET) - 1
+        for offset in range(6):
+            if index & (1 << offset):
+                target = 6 * position + offset
+                out[target >> 3] |= 1 << (target & 7)
+    return bytes(out)
 
 
-def decode_page_code(value: int) -> str:
+def _decode_page_code_index(data: bytes, position: int) -> int:
+    index = 0
+    for offset in range(6):
+        source = 6 * position + offset
+        if source >> 3 < len(data) and data[source >> 3] & (1 << (source & 7)):
+            index |= 1 << offset
+    return index
+
+
+def decode_page_code(data: bytes, length: int = CODE_LENGTH) -> str:
     characters = []
-    for position in range(CODE_LENGTH):
-        index = (value >> (6 * position)) & 0x3F
+    for position in range(length):
+        index = _decode_page_code_index(data, position)
         characters.append(CODE_ALPHABET[index] if index < len(CODE_ALPHABET) else PAD_CHARACTER)
     while characters and characters[-1] == PAD_CHARACTER:
         characters.pop()
     return "".join(characters)
+
+
+def validate_page_code(data: bytes, length: int = CODE_LENGTH) -> bool:
+    """每个 6-bit 字符是否都落在 37 符号表内，且未被字符用到的比特必须为 0。
+
+    15 字符只用 90 bit，字段有 96 bit —— 多出来的 6 bit 留 0，结构自检顺手查掉，
+    等于白拿 6 bit 判别力。
+    """
+    if not all(_decode_page_code_index(data, position) < len(CODE_ALPHABET)
+               for position in range(length)):
+        return False
+    used_bits = length * 6
+    for bit in range(used_bits, len(_pad(data, PAGE_CODE_BYTE_COUNT)) * 8):
+        if data[bit >> 3] & (1 << (bit & 7)):
+            return False
+    return True
 
 
 def grep_hint(code: str) -> str:
@@ -698,6 +773,16 @@ def decode_with_ladder(image, bits_candidates, planes, key, search_tile: bool = 
     return best, tier_of(best, key)
 
 
+def build_clock_line(build: int) -> str:
+    """build 号是外部传入的 12 位十进制（YYYYMMDDHHMM），这里渲染成可读时间。
+
+    语义上它就是构建方当地的墙上时间，不做时区换算，直接按数字拆。
+    """
+    digits = f"{build:012d}"
+    return (f"build 时间: {digits[0:4]}-{digits[4:6]}-{digits[6:8]} "
+            f"{digits[8:10]}:{digits[10:12]}（构建方当地墙上时间）")
+
+
 def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) -> None:
     if result.payload_bits != PAYLOAD_BITS:
         fail(f"--layout 需要 --bits {PAYLOAD_BITS} 且载荷为 {PAYLOAD_BYTE_COUNT} 字节", 2)
@@ -706,10 +791,6 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
         fail(f"--layout 需要 --bits {PAYLOAD_BITS} 且载荷为 {PAYLOAD_BYTE_COUNT} 字节", 2)
 
     stamp = datetime.datetime.fromtimestamp(fields.timestamp, datetime.timezone.utc)
-    if fields.layout_version != LAYOUT_VERSION:
-        print(f"注意: 这张截图是 layout=v{fields.layout_version}，当前布局是 v{LAYOUT_VERSION}，"
-              "page/tag 字段边界不同，下面的解读可能是错的")
-
     code = fields.page_name_code
     if pages is not None:
         hits = registry_matches(pages, code)
@@ -725,19 +806,25 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
     # 校验分档必须如实写：自检值通过只证明"解对了"，不证明"没被伪造"
     verification = fields.verification(key)
     if verification == "signed":
-        mac_line = "mac=OK(验签)"
+        check_line = "mac=OK(验签)"
     elif verification == "selfCheck":
-        mac_line = "mac=OK(自检,未验签)"
+        check_line = "mac=OK(自检,未验签)"
     elif verification == "unsigned":
-        mac_line = ("mac=未签名(字段自洽,退结构自检)" if fields.is_plausible
-                    else "mac=未签名(字段不自洽,谨慎)")
+        check_line = ("mac=未签名(字段自洽,退结构自检)" if fields.is_plausible
+                      else "mac=未签名(字段不自洽,谨慎)")
     else:
-        mac_line = "mac=未校验(需要 --key)" if key is None else "mac=BAD(密钥不符或载荷被改)"
+        check_line = "mac=未校验(需要 --key)" if key is None else "mac=BAD(密钥不符或载荷被改)"
 
+    build_line = "build=未填" if fields.build == 0 else f"build={fields.build_number}"
+    note = fields.note
+    note_line = "note=（非法 UTF-8）" if note is None else ("note=（空）" if not note else f"note={note}")
     print(
         f"uid={fields.uid}(0x{fields.uid:08X})  time={stamp.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
-        f"{page_line}  layout=v{fields.layout_version} app={fields.app} env={fields.environment}  {mac_line}"
+        f"{page_line}  {build_line}  {note_line}  "
+        f"layout=v{LAYOUT_VERSION} app={fields.app} env={fields.environment}  {check_line}"
     )
+    if fields.build != 0:
+        print(build_clock_line(fields.build))
 
 
 def main(argv: list[str]) -> int:

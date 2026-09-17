@@ -110,26 +110,31 @@ def _blend(dst: np.ndarray, top: np.ndarray, dx: int, dy: int) -> None:
     dst[y0:y1, x0:x1] = region.astype(np.uint8)
 
 
+BUILD = 202609161722
+
+
 def make_payload(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
-                 class_name: str = "BHProfileViewController", app: int = 1) -> bytes:
-    fields = bwdecode.Payload.build(uid, timestamp, class_name, app=app, key=KEY)
-    mac = fields.mac
-    return bwdecode.signed_body(fields.uid, fields.timestamp, fields.page_code, fields.tag) + mac
+                 class_name: str = "BHProfileViewController", app: int = 1,
+                 note: str = "hotfix-3") -> bytes:
+    """有密钥部署：校验值是 HMAC。"""
+    return bwdecode.Payload.build_payload(uid, timestamp, BUILD, class_name,
+                                          note=note, app=app, key=KEY).bytes
 
 
 def make_self_checked(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
-                      class_name: str = "BHProfileViewController", app: int = 1) -> bytes:
-    """无密钥部署的载荷：mac 位置是公开自检值。"""
-    fields = bwdecode.Payload.self_checked(uid, timestamp, class_name, app=app)
-    return bwdecode.signed_body(fields.uid, fields.timestamp, fields.page_code, fields.tag) + fields.mac
+                      class_name: str = "BHProfileViewController", app: int = 1,
+                      note: str = "hotfix-3") -> bytes:
+    """无密钥部署：校验值位置是公开自检值。"""
+    return bwdecode.Payload.build_payload(uid, timestamp, BUILD, class_name,
+                                          note=note, app=app, key=None).bytes
 
 
 def make_unsigned(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
                   class_name: str = "BHProfileViewController", app: int = 1) -> bytes:
     """像 `mac: []` 那样没带校验值的载荷。"""
-    tag = (bwdecode.LAYOUT_VERSION << 28) | ((app & 0xFF) << 20)
-    page_code = bwdecode.encode_page_code(bwdecode.page_name_code(class_name))
-    return bwdecode.signed_body(uid, timestamp, page_code, tag) + bytes(12)
+    fields = bwdecode.Payload.build_payload(uid, timestamp, BUILD, class_name,
+                                            note="", app=app, key=None)
+    return fields.bytes[:52] + bytes(12)
 
 
 def crop(image: np.ndarray, left: int, top: int) -> np.ndarray:
@@ -230,15 +235,32 @@ def test_page_codec() -> None:
         "BHProfileViewController": "profile",
         "BHChatListViewController": "chatlist",
         "BHLiveRoomViewController": "liveroom",
-        "BHUserProfileEditViewController": "userprofil",
+        "BHUserProfileEditViewController": "userprofileedit",   # 恰好 15 字符，不截断
         "Module.BHOrderViewController": "order",
     }
     for class_name, expected in cases.items():
         code = bwdecode.page_name_code(class_name)
         check(code == expected, f"{class_name} → {code}")
-        check(bwdecode.decode_page_code(bwdecode.encode_page_code(code)) == code, f"{code} 编解码回环")
+        encoded = bwdecode.encode_page_code(code)
+        check(len(encoded) == 12, f"{code} → 12 字节（96 bit，其中 90 bit 有效）")
+        check(bwdecode.decode_page_code(encoded) == code, f"{code} 编解码回环")
+        check(bwdecode.validate_page_code(encoded), f"{code} 全部字符落在 37 符号表内")
     check(bwdecode.registry_matches(["BHProfileViewController", "BHChatListViewController"], "profile")
           == ["BHProfileViewController"], "注册表按短码命中唯一类名")
+
+    # 15 字符只用 90 bit，字段剩 6 bit 必须为 0（结构自检会查）
+    code = bwdecode.page_name_code("BHProfileViewController")
+    encoded = bytearray(bwdecode.encode_page_code(code))
+    check(bwdecode.validate_page_code(bytes(encoded)), "填充位为 0 时通过")
+    encoded[11] |= 0x40          # 第 90 bit（未使用区）置 1
+    check(not bwdecode.validate_page_code(bytes(encoded)), "填充位被置 1 → 结构自检拒绝")
+
+    # note 现在是 22 字节
+    check(bwdecode.NOTE_BYTE_COUNT == 22, "note 字段 22 字节")
+    long_note = "x" * 40
+    fields = bwdecode.Payload.build_payload(1, 1_760_000_000, 202609161722, "BHProfileViewController",
+                                            note=long_note, key=KEY)
+    check(len(fields.note.encode()) == 22, "超长 note 被截到 22 字节")
 
 
 def test_self_check() -> None:
@@ -264,10 +286,17 @@ def test_self_check() -> None:
 
     # 篡改一位也要拦
     tampered = bytearray(checked)
-    tampered[8] ^= 0x01
+    tampered[16] ^= 0x01          # pageCode 首字节（v4 偏移 16..31）
     tampered_fields = bwdecode.Payload.from_bytes(bytes(tampered))
     assert tampered_fields is not None
     check(tampered_fields.verification(None) == "failed", "改 pageCode 一位 → 自检值拦截")
+
+    for offset, hint in ((8, "build"), (33, "note"), (31, "tag")):
+        edited = bytearray(checked)
+        edited[offset] ^= 0x01
+        fields_at = bwdecode.Payload.from_bytes(bytes(edited))
+        assert fields_at is not None
+        check(fields_at.verification(None) == "failed", f"改 {hint} 一位 → 自检值拦截")
 
 
 def test_crop_without_key() -> None:
@@ -303,8 +332,10 @@ def test_crop_without_key() -> None:
         false_positives[label] = count
     check(false_positives["自检值"] == 0,
           f"全搜索空间（64×512）里自检值的假阳性 = {false_positives['自检值']}")
-    check(false_positives["结构自检"] > 0,
-          f"同一空间里结构自检的假阳性 = {false_positives['结构自检']}（所以它只能当兵底）")
+    # 结构自检的假阳性数会随内容/几何变化（v4 的结构约束比 v3 强，这里可能为 0）。
+    # 它不能当校验值用的真正理由见 test_self_check：近似解能过结构自检、过不了自检值 —— 那条是硬断言。
+    check(false_positives["结构自检"] >= false_positives["自检值"],
+          f"同一空间里结构自检的假阳性 = {false_positives['结构自检']}（只作参考，不依赖它裁决）")
 
 
 def test_pair_offset() -> None:
