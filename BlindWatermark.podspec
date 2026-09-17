@@ -1,10 +1,11 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermark'
   s.version          = '0.1.0'
-  s.summary          = '常驻屏上不可见盲水印，截图可解码溯源'
+  s.summary          = '常驻屏上不可见盲水印，截图可解码溯源（设备 / 时间 / 页面）'
   s.description      = <<-DESC
-    覆盖 App 全部界面的低幅度亮度扰动层，肉眼不可见，截图必然被带上。
-    每 16x16 像素块成对差分编码 1 bit，解码只看亮度差的符号，与底色无关，抗 JPEG。
+    覆盖 App 全部界面的低幅度色度扰动层，肉眼不可见，截图必然被带上。
+    每两个相邻的 8x8 像素块成对差分编码 1 bit，解码只看差值的符号与显著度（z 值），
+    与底色无关，抗 JPEG。载荷 256 bit：uid + Unix 秒 + 页面短码 + 96 bit HMAC。
   DESC
   s.homepage         = 'https://example.com/BlindWatermark'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }

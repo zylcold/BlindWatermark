@@ -17,6 +17,8 @@ Sources/bwdecode/             截图解码 CLI
 Tests/BlindWatermarkCoreTests/ 单元测试
 Demo/                         iOS 演示 App（xcodegen 生成工程）+ sweep.sh 逐页对比
 skills/blind-watermark/       Agent Skill
+tools/bwdecode.py             Python 版解码器（镜像实现），tools/test_bwdecode.py 自检 + 与 Swift 对账
+.github/workflows/ci.yml      PR check：build + test + Demo 编译 + Python 解码器对账
 ```
 
 ## 常用命令
@@ -35,6 +37,9 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - **编解码参数必须两端一致**：`payloadBits` / `plane` / `offset` / 载荷布局。任何一项不一致都会解出自洽但错误的结果。
 - **改载荷布局 = 破坏历史截图兼容。** 必须显式说明影响面，并同步 `README.md` 与 `skills/blind-watermark/SKILL.md`。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
+- **改解码逻辑要同步两处**：`Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
+  是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码）。
+  改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。
 - **非平凡逻辑留一个可运行校验**（单元测试或 assert 自检），不靠"我推理过"。
 - **性能结论要实测。** 不接受"预期 4–8x"这类没测过的数字；写实测值并注明测量条件（设备/模拟器、模式、样本）。
 - **不要静默降级**：解码置信度不足时按 `弱 bit` 规则如实报 `WEAK` / `NO`，不硬凑一个结果。
@@ -65,5 +70,7 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 
 ## 文档同步
 
-- `README.md` 与 `skills/blind-watermark/SKILL.md` 是**对外契约**（接入方 + Agent 都照它做事）。
-- 参数、默认值、布局、容量上限、CLI 输出格式变了，两处必须同步改；文档里不要留过期数字。
+- `README.md`（中）/ `README.en.md`（英）/ `skills/blind-watermark/SKILL.md` 是**对外契约**
+  （接入方 + Agent 都照它做事）。
+- 三处内容必须一致：参数、默认值、布局、容量上限、CLI 输出格式、实测数字。中英两份改动要同一次提交做完。
+- 实测表格里的数字必须来自本机可复现的测量（注明设备/模拟器版本、平面、delta、样本），不要留过期数字。
