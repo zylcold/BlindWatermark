@@ -140,7 +140,7 @@ NO   弱 bit 更多           画面里大概没有水印
 
 无水印画面实测 `|z|` 中位 0.5、弱 bit 32/32，与带水印画面分得很开。
 
-Agent 用法见 [`.agents/skills/blind-watermark/SKILL.md`](.agents/skills/blind-watermark/SKILL.md)。
+Agent 用法见 [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL.md)。
 
 ## 默认 payload 布局
 
