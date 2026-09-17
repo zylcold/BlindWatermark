@@ -154,13 +154,20 @@ public struct WatermarkPayload: Equatable {
         tag: UInt32,
         key: SymmetricKey
     ) -> [UInt8] {
-        let body = WatermarkPayload(
-            uid: uid,
-            timestamp: timestamp,
-            pageCode: pageCode,
-            tag: tag,
-            mac: []
-        ).bytes.prefix(signedByteCount)
+        var body: [UInt8] = []
+        body.reserveCapacity(signedByteCount)
+        body.append(contentsOf: [
+            UInt8(uid & 0xFF), UInt8((uid >> 8) & 0xFF), UInt8((uid >> 16) & 0xFF), UInt8((uid >> 24) & 0xFF),
+        ])
+        body.append(contentsOf: [
+            UInt8(timestamp & 0xFF), UInt8((timestamp >> 8) & 0xFF),
+            UInt8((timestamp >> 16) & 0xFF), UInt8((timestamp >> 24) & 0xFF),
+        ])
+        for i in 0..<8 { body.append(UInt8((pageCode >> (8 * UInt64(i))) & 0xFF)) }
+        body.append(contentsOf: [
+            UInt8(tag & 0xFF), UInt8((tag >> 8) & 0xFF),
+            UInt8((tag >> 16) & 0xFF), UInt8((tag >> 24) & 0xFF),
+        ])
         let code = HMAC<SHA256>.authenticationCode(for: Data(body), using: key)
         return Array([UInt8](code).prefix(macByteCount))
     }

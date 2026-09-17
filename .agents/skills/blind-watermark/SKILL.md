@@ -59,7 +59,7 @@ BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
 **密钥只在服务端持有**：服务端算好 mac 下发完整 32 字节，客户端只负责渲染；解码端 `--key` 校验。
 客户端自己算 mac 等于把密钥交出去。96 bit mac 已足够挡住伪造与针对性碰撞。
 
-### 余量（实测，chroma，iPhone 16，弱 bit 全部 0/128）
+### 余量（实测，chroma，iPhone 16，弱 bit 全部 0/256）
 
 | 页面 | \|z\|中位 | 最弱 |
 |---|---|---|
@@ -123,7 +123,7 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 | `平面` | `chroma`（默认，不可见）或 `luma` |
 | `相位` | 图案的像素偏移，整屏截图恒为 `(0,0)` |
 | `signal` | 平均特征差。chroma 默认参数下约 9 |
-| `\|z\|中位` / `最弱` | 各 bit 显著度。128 bit 下实测中位 100~230，无水印约 0.5 |
+| `\|z\|中位` / `最弱` | 各 bit 显著度。256 bit 下实测中位 37~161，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
 | `uid` / `time` / `page` / `tag` | `--layout` 解出的字段；`page` 是短码，后面带注册表命中或 grep 提示 |
 | `mac` | `--key` 给了则校验：`OK` / `BAD` / `未校验` |
@@ -136,12 +136,12 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
 4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把索引还原成类名。
    界面提示「索引越界：注册表与截图版本不符」说明注册表和这张截图不是同一版，别硬猜。
-6. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，128 bit 布局的时间戳
+5. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，256 bit 布局的时间戳
    已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
 
 ### 页面注册表
 
-接入端 `PageRegistry(names:).index(for: className)` 登记（页面出现顺序即索引），
+接入端 `PageRegistry(names:)` 初始化或 `register(_:)` 增量登记，
 `write(to:)` 落盘；解码端 `--pages` 加载同一份 JSON。格式就是字符串数组：
 
 ```json

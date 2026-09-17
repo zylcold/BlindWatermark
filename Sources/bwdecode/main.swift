@@ -6,11 +6,11 @@ import BlindWatermarkCore
 
 // 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma]
 //                 [--layout] [--key <hex>] [--pages <json>] [--auto]
-//   --bits    payload 有效位数，默认 128（推荐布局），必须与打水印端一致
+//   --bits    payload 有效位数，默认 256（推荐布局），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
 //   --auto-offset 已知位数 / 平面时自动搜索最优相位
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
-//   --layout  按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
+//   --layout  按 256 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
 //   --key     服务端密钥（hex），配合 --layout 校验 mac
 //   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
 //   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
@@ -132,9 +132,13 @@ if auto {
             return (1_420_070_400...4_102_444_800).contains(fields.timestamp)
         }
     }
+    var payloadBitsCandidates = [WatermarkPayload.payloadBits]
+    if payloadBits != WatermarkPayload.payloadBits {
+        payloadBitsCandidates.append(payloadBits)
+    }
     result = BlockCodec.decodeBest(
         image,
-        payloadBitsCandidates: Array(Set([WatermarkPayload.payloadBits, payloadBits])),
+        payloadBitsCandidates: payloadBitsCandidates,
         planes: [.chroma, .luma],
         searchPhase: true,
         validate: validator

@@ -57,6 +57,9 @@ public enum BlockCodec {
     public static let pairsPerTile = pairsPerRow * blockRowsPerTile
     /// 载荷上限（bit）。再大每 tile 重复次数会低于 2，翻转极性就没戏了
     public static let maxPayloadBits = 256
+    /// 第二阶段会对入围相位继续做 tile 旋转穷举；保留 16 组足够覆盖常见退化相位，
+    /// 同时把 64×512×位数 的最坏开销压在可接受范围内。
+    static let maxPhaseFinalists = 16
 
     public struct Decoded: Equatable {
         /// 解出的载荷，小端按 bit 打包，长度 = ceil(payloadBits / 8)
@@ -274,7 +277,7 @@ public enum BlockCodec {
         }
         guard !scored.isEmpty else { return nil }
         scored.sort { $0.score > $1.score }
-        let finalists = scored.prefix(min(scored.count, 16)).map(\.context)
+        let finalists = scored.prefix(min(scored.count, maxPhaseFinalists)).map(\.context)
 
         let rotations = searchTile ? Array(0..<pairsPerTile) : [0]
 
@@ -299,8 +302,11 @@ public enum BlockCodec {
         // 唯一可靠的裁决是 MAC —— 所以校验器通过即返回，不按分数排序。
         for context in finalists {
             for bits in bitsList {
-                for rotation in rotations where validate(decode(context, bits: bits, rotation: rotation)) {
-                    return decode(context, bits: bits, rotation: rotation)
+                for rotation in rotations {
+                    let candidate = decode(context, bits: bits, rotation: rotation)
+                    if validate(candidate) {
+                        return candidate
+                    }
                 }
             }
         }
