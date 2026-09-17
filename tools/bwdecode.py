@@ -40,6 +40,10 @@ MIN_VARIANCE = 0.25
 MIN_MAGNITUDE = 0.5
 # |z| 小于它就认为该 bit 证据不足
 WEAK_Z = 3.0
+# 每个 bit 至少要有几次观测，才允许在**没有校验值**时解读字段。
+# 实测（真机像素、chroma、512 bit、整宽 1179）：每 bit 4.4 次观测时弱 bit 16/512、96 bit 自检不过；
+# 5.3 次时弱 bit 0/512、自检通过。取 5 作下限，比临界点略保守。载荷带校验值时不受限制。
+MIN_OBSERVATIONS_PER_BIT = 5
 
 PAYLOAD_BITS = 512
 PAYLOAD_BYTE_COUNT = 64
@@ -162,10 +166,12 @@ class Decoded:
     __slots__ = (
         "payload_bytes", "payload_bits", "plane", "offset_x", "offset_y",
         "signal", "confidence", "weak_bits", "median_abs_z", "scores",
+        "min_observations", "average_observations",
     )
 
     def __init__(self, payload_bytes, payload_bits, plane, offset_x, offset_y,
-                 signal, confidence, weak_bits, median_abs_z, scores):
+                 signal, confidence, weak_bits, median_abs_z, scores,
+                 min_observations=0, average_observations=0.0):
         self.payload_bytes = payload_bytes
         self.payload_bits = payload_bits
         self.plane = plane
@@ -176,6 +182,13 @@ class Decoded:
         self.weak_bits = weak_bits
         self.median_abs_z = median_abs_z
         self.scores = scores
+        self.min_observations = min_observations
+        self.average_observations = average_observations
+
+    @property
+    def has_sufficient_evidence(self) -> bool:
+        """证据够不够支撑"解读字段"。载荷带校验值时不需要它。"""
+        return self.min_observations >= MIN_OBSERVATIONS_PER_BIT
 
 
 def is_flipped(local_pair_index: int, payload_bits: int) -> bool:
@@ -238,6 +251,8 @@ def fold(stats: PairStats, payload_bits: int, rotation: int = 0) -> Decoded:
         weak_bits=int((np.abs(scores) < WEAK_Z).sum()),
         median_abs_z=float(absolute[absolute.size // 2]) if absolute.size else 0.0,
         scores=scores,
+        min_observations=int(counts.min()) if counts.size else 0,
+        average_observations=(stats.observed / payload_bits) if payload_bits else 0.0,
     )
 
 
@@ -870,7 +885,14 @@ def main(argv: list[str]) -> int:
         fail("解码失败: 图像太小，或 --auto 没找到可信的候选", 1)
 
     total, weak = result.payload_bits, result.weak_bits
-    if weak == 0:
+    validated = tier in ("signed", "selfCheck")
+    # 没有校验值时，观测太少的图会解出一份「看着正常的垃圾」——必须自己当守门人
+    insufficient = not validated and not result.has_sufficient_evidence
+    if insufficient:
+        verdict = (f"TOO_SMALL(每 bit 仅 {result.average_observations:.1f} 次观测、"
+                   f"最少 {result.min_observations} 次，需要 ≥ {MIN_OBSERVATIONS_PER_BIT}："
+                   "图太小或图案已被破坏)")
+    elif weak == 0:
         verdict = f"OK(全部 {total} bit 显著)"
     elif weak <= total // 8:
         verdict = f"WEAK({weak}/{total} bit 证据不足，结论谨慎)"
@@ -884,7 +906,16 @@ def main(argv: list[str]) -> int:
         f"最弱={result.confidence:.1f}  弱bit={weak}/{total}  {verdict}"
     )
     if options["layout"]:
+        if insufficient:
+            fail(f"图像太小 / 图案已被破坏，不解读字段：可用观测每 bit 仅 "
+                 f"{result.average_observations:.1f} 次（最少 {result.min_observations} 次，"
+                 f"需要 ≥ {MIN_OBSERVATIONS_PER_BIT}）。请让用户发原图，并保证范围足够大"
+                 f"（512 bit 载荷实测需要约 2700 个 pair，整宽 1179 时约 300px 高，整屏最稳）", 1)
         print_layout(result, key, options["pages"])
+    elif insufficient:
+        warn(f"每 bit 仅 {result.average_observations:.1f} 次观测（最少 {result.min_observations} 次，"
+             f"需要 ≥ {MIN_OBSERVATIONS_PER_BIT}）：图太小或图案已被破坏，载荷不可信，"
+             f"不要用 --layout 解读字段")
     elif tier == "unsigned":
         # 没开 --layout 也要提醒：无校验值的载荷在裁剪场景下不可信
         warn(NO_VALIDATOR_WARNING)

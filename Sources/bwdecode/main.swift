@@ -246,8 +246,18 @@ let hex = result.payloadBytes.map { String(format: "%02x", $0) }.joined()
 // 真实界面里有文字边缘、与块网格对齐的版式，个别 bit 的 z 天然会塌，全局最小值太苛刻。
 let total = result.payloadBits
 let weak = result.weakBits
+let validated = tier == .signed || tier == .selfChecked
+// 没有校验值时，观测太少的图会解出一份「看着正常的垃圾」——必须自己当守门人。
+let insufficient = !validated && !result.hasSufficientEvidence
 let verdict: String
-if weak == 0 {
+if insufficient {
+    verdict = String(
+        format: "TOO_SMALL(每 bit 仅 %.1f 次观测、最少 %d 次，需要 ≥ %d：图太小或图案已被破坏)",
+        result.averageObservations,
+        result.minObservations,
+        BlockCodec.minObservationsPerBit
+    )
+} else if weak == 0 {
     verdict = "OK(全部 \(total) bit 显著)"
 } else if weak <= total / 8 {
     verdict = "WEAK(\(weak)/\(total) bit 证据不足，结论谨慎)"
@@ -275,6 +285,17 @@ if showLayout {
     guard result.payloadBits == WatermarkPayload.payloadBits,
           let payload = WatermarkPayload(bytes: result.payloadBytes) else {
         fail("--layout 需要 --bits \(WatermarkPayload.payloadBits) 且载荷为 \(WatermarkPayload.byteCount) 字节", code: 2)
+    }
+    // 没有校验值 + 观测不足：拒绝给字段。宁可报「图太小」，也不要输出一份看着正常的垃圾。
+    if insufficient {
+        fail(String(
+            format: "图像太小 / 图案已被破坏，不解读字段：可用观测每 bit 仅 %.1f 次（最少 %d 次，需要 ≥ %d）。"
+                + "请让用户发原图，并保证范围足够大（512 bit 载荷实测需要约 2700 个 pair，"
+                + "整宽 1179 时约 300px 高，整屏最稳）",
+            result.averageObservations,
+            result.minObservations,
+            BlockCodec.minObservationsPerBit
+        ), code: 1)
     }
     let date = Date(timeIntervalSince1970: TimeInterval(payload.timestamp))
     let formatter = DateFormatter()
@@ -335,6 +356,14 @@ if showLayout {
     if payload.build != 0 {
         print(buildClockLine(payload.build))
     }
+} else if insufficient {
+    warn(String(
+        format: "每 bit 仅 %.1f 次观测（最少 %d 次，需要 ≥ %d）：图太小或图案已被破坏，"
+            + "载荷不可信，不要用 --layout 解读字段",
+        result.averageObservations,
+        result.minObservations,
+        BlockCodec.minObservationsPerBit
+    ))
 } else if let payload = fields(of: result), payload.isUnsigned {
     // 没开 --layout 也要提醒：无校验值的载荷在裁剪场景下不可信
     warn(noValidatorWarning)

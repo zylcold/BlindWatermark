@@ -576,8 +576,9 @@ final class AutoDecodeTests: XCTestCase {
         try XCTUnwrap(SymmetricKey(hex: keyHex))
     }
 
-    private func shot(payload: [UInt8], plane: WatermarkPlane, offset: (Int, Int)) -> RGBAImage {
-        var base = RGBAImage(width: 640, height: 900)
+    private func shot(payload: [UInt8], plane: WatermarkPlane, offset: (Int, Int),
+                      width: Int = 640, height: Int = 900) -> RGBAImage {
+        var base = RGBAImage(width: width, height: height)
         var seed: UInt64 = 11
         for y in 0..<base.height {
             for x in 0..<base.width {
@@ -768,6 +769,33 @@ final class AutoDecodeTests: XCTestCase {
             XCTAssertEqual(parity.medianAbsZ, aligned.medianAbsZ, accuracy: 0.1,
                            "left=\(left) 奇偶档的 |z| 应与偶数块裁剪持平")
         }
+    }
+
+    /// 观测不足必须被标出来：没有校验值时，小图会解出一份「看着正常的垃圾」。
+    /// 实测临界点（真机像素、chroma、512 bit、整宽 1179）：每 bit 4.4 次观测时弱 bit 16/512、
+    /// 96 bit 自检不过；5.3 次时 0/512、通过。这里用合成图钉住这个守门行为。
+    func testInsufficientObservationsAreFlagged() throws {
+        let payload = WatermarkPayload.selfChecked(
+            uid: 0x1234_5678, timestamp: 1_760_000_000, build: 202609161722,
+            pageClassName: "BHTextListViewController", note: "x"
+        )
+        // 640x250 → 40 列 pair × 31 行 = 1240 个观测 / 512 bit ≈ 2.4 次每 bit
+        let small = BlockCodec.decode(
+            shot(payload: payload.bytes, plane: .chroma, offset: (0, 0), width: 640, height: 250),
+            payloadBits: WatermarkPayload.payloadBits
+        )
+        let smallResult = try XCTUnwrap(small)
+        XCTAssertLessThan(smallResult.minObservations, BlockCodec.minObservationsPerBit)
+        XCTAssertFalse(smallResult.hasSufficientEvidence, "每 bit 观测不足时必须标出来")
+
+        // 640x900 → 4480 个观测 / 512 bit ≈ 8.8 次每 bit，够
+        let full = BlockCodec.decode(
+            shot(payload: payload.bytes, plane: .chroma, offset: (0, 0)),
+            payloadBits: WatermarkPayload.payloadBits
+        )
+        let fullResult = try XCTUnwrap(full)
+        XCTAssertGreaterThanOrEqual(fullResult.minObservations, BlockCodec.minObservationsPerBit)
+        XCTAssertTrue(fullResult.hasSufficientEvidence)
     }
 
     /// 只搜相位不搜旋转，裁过的图必然解错 —— 固化这个失败模式，防止有人把旋转搜索删掉

@@ -257,9 +257,10 @@ Read the **weak-bit count** (bits with `|z| < 3`), not the single weakest bit �
 z value of individual bits collapses naturally and a global minimum is too harsh:
 
 ```
-OK   weak bits = 0                    every bit is significant, conclusion stands
-WEAK weak bits <= payloadBits/8       barely decoded, cross-check the conclusion (= 64 at 512 bits)
-NO   more weak bits                   there is probably no watermark in the picture
+OK         weak bits = 0               every bit is significant, conclusion stands
+WEAK       weak bits <= payloadBits/8  barely decoded, cross-check the conclusion (= 64 at 512 bits)
+NO         more weak bits              there is probably no watermark in the picture
+TOO_SMALL  < 5 observations per bit    image too small / pattern destroyed — fields are NOT reported
 ```
 
 When the verdict says `NO` / `WEAK` but `mac=OK`, **the MAC wins**: weak bits only mean little
@@ -415,6 +416,13 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin 
 
 ### Known limits
 
+- **Small crops cannot be decoded, and the decoder refuses to answer**: observations per bit =
+  available pairs / payloadBits. Measured (real pixels, chroma, 512 bit, full width 1179): at 4.4
+  observations per bit there are 16/512 weak bits and the self-check fails; at 5.3 it passes — so the
+  floor is **5 observations per bit**, about **2700 pairs** (≈300 px tall at full width, or a full
+  1179×2556 screen). Below that the decoder prints `TOO_SMALL(...)` and **refuses to interpret fields
+  with --layout** (degrading to "looks fine but is garbage" is not allowed) — a 482×440 crop measures
+  1.5–3.2 observations per bit and is always refused.
 - **layout v3 (256 bit / 32 bytes) is deprecated**: field boundaries changed, so historical v3
   screenshots no longer decode — an explicit breaking change. To read older images, use the decoder
   from the 1.0.0 tag.

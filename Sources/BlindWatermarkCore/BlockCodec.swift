@@ -63,6 +63,13 @@ public enum BlockCodec {
     /// 同时把 64×512×位数 的最坏开销压在可接受范围内。
     static let maxPhaseFinalists = 16
 
+    /// 每个 bit 至少要有几次观测，才允许在**没有校验值**时解读字段。
+    ///
+    /// 实测（真机像素、chroma、512 bit、整宽 1179）：每 bit 4.4 次观测时弱 bit 16/512、
+    /// 96 bit 自检不过；5.3 次时弱 bit 0/512、自检通过。取 5 作下限 —— 比实测临界点略保守，
+    /// 因为内容越噪、需要的观测越多。载荷带校验值时不受这条限制（校验值本身就是裁决）。
+    public static let minObservationsPerBit = 5
+
     public struct Decoded: Equatable {
         /// 解出的载荷，小端按 bit 打包，长度 = ceil(payloadBits / 8)
         public let payloadBytes: [UInt8]
@@ -79,6 +86,18 @@ public enum BlockCodec {
         public let weakBits: Int
         /// 各 bit |z| 的中位数
         public let medianAbsZ: Double
+        /// 观测次数最少的那个 bit 攒到几次观测。**判断这张图够不够大看它**
+        public let minObservations: Int
+        /// 每 bit 平均观测次数（= 有效 pair 数 / payloadBits）
+        public let averageObservations: Double
+
+        /// 证据是否够支撑"解读字段"。
+        ///
+        /// 载荷带校验值时不需要它（96 bit 校验值本身就是裁决）；没有校验值时它是唯一的守门人：
+        /// 观测太少的图会解出一份**看着正常的垃圾**，必须拒绝而不是照打。
+        public var hasSufficientEvidence: Bool {
+            minObservations >= BlockCodec.minObservationsPerBit
+        }
 
         /// 低 32 bit 视图。payloadBits ≤ 32 时就是完整值；更长时只取前 4 字节，别拿来当完整载荷用
         public var payload: UInt32 {
@@ -442,6 +461,8 @@ public enum BlockCodec {
         let confidence: Double
         let weakBits: Int
         let medianAbsZ: Double
+        let minObservations: Int
+        let averageObservations: Double
     }
 
     /// 把按 pair 累积的统计折叠成 per-bit 统计。
@@ -500,7 +521,9 @@ public enum BlockCodec {
             // 只数「非零里小于 3」的话，纯色画面（所有 d 都低于 minMagnitude）会一个弱 bit
             // 都没有，被报成「全部 bit 显著」—— 这是把「没测到」当成「测得好」。
             weakBits: scores.filter { abs($0) < 3 }.count,
-            medianAbsZ: sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+            medianAbsZ: sorted.isEmpty ? 0 : sorted[sorted.count / 2],
+            minObservations: counts.min() ?? 0,
+            averageObservations: payloadBits > 0 ? Double(stats.observed) / Double(payloadBits) : 0
         )
     }
 
@@ -520,7 +543,9 @@ public enum BlockCodec {
             signal: folded.signal,
             confidence: folded.confidence,
             weakBits: folded.weakBits,
-            medianAbsZ: folded.medianAbsZ
+            medianAbsZ: folded.medianAbsZ,
+            minObservations: folded.minObservations,
+            averageObservations: folded.averageObservations
         )
     }
 

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -357,6 +358,42 @@ def test_pair_offset() -> None:
               f"left={left} 奇偶档读到真正的 pair（|z| {plain.median_abs_z:.1f} → {parity.median_abs_z:.1f}）")
 
 
+def test_insufficient_observations() -> None:
+    print("观测不足必须拒绝解读（图太小 / 图案被破坏）")
+    payload = make_self_checked()
+    # 640x900 → 每 bit 8.8 次观测；640x250 → 2.4 次
+    full = shot(payload, "chroma", (0, 0))
+    small = shot(payload, "chroma", (0, 0), width=640, height=250)
+
+    big = bwdecode.decode(full, payload_bits=512, plane="chroma")
+    tiny = bwdecode.decode(small, payload_bits=512, plane="chroma")
+    assert big is not None and tiny is not None
+    check(big.has_sufficient_evidence, f"整屏图观测够：最少 {big.min_observations} 次/bit")
+    check(not tiny.has_sufficient_evidence,
+          f"小图被标出来：最少 {tiny.min_observations} 次/bit（阈值 {bwdecode.MIN_OBSERVATIONS_PER_BIT}）")
+    check(tiny.average_observations < bwdecode.MIN_OBSERVATIONS_PER_BIT,
+          f"小图平均观测 {tiny.average_observations:.1f} 次/bit")
+
+    # CLI 行为：小图 + --layout 必须拒绝并给非零退出码，而不是打一份看着正常的垃圾字段
+    folder = tempfile.mkdtemp()
+    try:
+        small_path = os.path.join(folder, "small.png")
+        Image.fromarray(small).save(small_path)
+        result = subprocess.run([SWIFT_CLI, small_path, "--plane", "chroma", "--layout"],
+                                capture_output=True, text=True)
+        check(result.returncode != 0, f"Swift CLI 拒绝解读（exit={result.returncode}）")
+        check("图像太小" in result.stderr or "TOO_SMALL" in result.stdout,
+              "Swift CLI 明确报「图像太小 / TOO_SMALL」")
+
+        full_path = os.path.join(folder, "full.png")
+        Image.fromarray(full).save(full_path)
+        result = subprocess.run([SWIFT_CLI, full_path, "--plane", "chroma", "--layout", "--key", KEY_HEX],
+                                capture_output=True, text=True)
+        check(result.returncode == 0 and "uid=" in result.stdout, "正常尺寸仍然照常解读")
+    finally:
+        shutil.rmtree(folder)
+
+
 def test_swift_cross_check(payload: bytes) -> None:
     print("与 Swift bwdecode 对账")
     if not os.path.exists(SWIFT_CLI):
@@ -421,6 +458,7 @@ def main() -> int:
         test_self_check()
         test_crop_without_key()
         test_pair_offset()
+        test_insufficient_observations()
         test_page_codec()
         test_swift_cross_check(payload)
     except AssertionError as error:
