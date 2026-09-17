@@ -46,6 +46,8 @@ PAYLOAD_BYTE_COUNT = 32
 LAYOUT_VERSION = 3
 MAC_BYTE_COUNT = 12
 SIGNED_BYTE_COUNT = 20
+# 结构自检认定的合理时间戳区间：2015-01-01 ... 2100-01-01
+PLAUSIBLE_TIMESTAMP = (1_420_070_400, 4_102_444_800)
 
 SUFFIX_LADDER = [
     "ViewController", "ViewModel", "Presenter", "Interactor",
@@ -263,7 +265,7 @@ def decode(image: np.ndarray, payload_bits: int = PAYLOAD_BITS, offset_x: int = 
 
 
 def find_best_offset(image: np.ndarray, payload_bits: int = PAYLOAD_BITS, plane: str = "chroma",
-                     validate=None) -> tuple[int, int]:
+                     search_pair_offset: bool = False, validate=None) -> tuple[int, int]:
     """只搜索块网格相位（0..<8）。给「已知被裁过、平面与位数确定」的调用方用。
 
     给了 `validate`（通常是 MAC 校验）就在**通过校验**的候选里取 medianAbsZ 最高的；
@@ -280,8 +282,9 @@ def find_best_offset(image: np.ndarray, payload_bits: int = PAYLOAD_BITS, plane:
     best = (0, 0)
     best_score = -math.inf
     validated: tuple[tuple[int, int], float] | None = None
+    column_count = BLOCK * 2 if search_pair_offset else BLOCK
     for oy in range(BLOCK):
-        for ox in range(BLOCK):
+        for ox in range(column_count):
             candidate = _with_context(fold(accumulate(sat, width, height, ox, oy), payload_bits), plane, ox, oy)
             if candidate.median_abs_z > best_score:
                 best_score = candidate.median_abs_z
@@ -294,11 +297,16 @@ def find_best_offset(image: np.ndarray, payload_bits: int = PAYLOAD_BITS, plane:
 
 
 def decode_best(image: np.ndarray, payload_bits_candidates=None, planes=("chroma", "luma"),
-                search_phase: bool = True, search_tile: bool = True, validate=None) -> Decoded | None:
+                search_phase: bool = True, search_tile: bool = True,
+                search_pair_offset: bool = False, validate=None) -> Decoded | None:
     """自动探测解码：穷举相位 / 双平面 / 多种位数，选一个最可信的结果。
 
-    裁决规则：**先看 `validate`**（通常是 MAC 校验）；一个都没通过才退回按 medianAbsZ。
+    裁决规则：**先看 `validate`**（HMAC 或公开自检值校验）；一个都没通过才退回按 medianAbsZ。
     裸穷举不可信 —— 错位相位在低变化画面上也能让所有 bit 自洽。
+
+    `search_pair_offset` 多搜一档 block 偏移（ox 取 0..<16）：pair 是两个相邻块，
+    块网格错开一个块时解码端配的是跨两个 pattern pair 的块对，读出来是相邻两个 bit 的和
+    （只有两位相同时才留下观测），部分 bit 会稀疏到一个证据都没有。多搜一档后这些位重新变完整。
     """
     if payload_bits_candidates is None:
         payload_bits_candidates = [PAYLOAD_BITS, 32]
@@ -312,9 +320,11 @@ def decode_best(image: np.ndarray, payload_bits_candidates=None, planes=("chroma
     # 阶段一：全平面全相位累加一次，排出「块对齐 + 图案自洽」最好的几组。
     # 排序不能用 signal（被内容撑大，没水印的 luma 平面能拿 19），用 z 值。
     scored = []
+    column_count = BLOCK * 2 if search_pair_offset else BLOCK
     for plane in planes:
         sat = integral_image(feature_plane(image, plane))
-        phases = [(i % BLOCK, i // BLOCK) for i in range(BLOCK * BLOCK)] if search_phase else [(0, 0)]
+        phases = ([(i % column_count, i // column_count) for i in range(column_count * BLOCK)]
+                  if search_phase else [(0, 0)])
         for ox, oy in phases:
             stats = accumulate(sat, width, height, ox, oy)
             score = max(fold(stats, bits).median_abs_z for bits in bits_list)
@@ -366,6 +376,15 @@ def payload_mac(uid: int, timestamp: int, page_code: int, tag: int, key: bytes) 
     return hmac.new(key, signed_body(uid, timestamp, page_code, tag), hashlib.sha256).digest()[:MAC_BYTE_COUNT]
 
 
+def self_check(uid: int, timestamp: int, page_code: int, tag: int) -> bytes:
+    """公开自检值：SHA-256(前 20 字节) 截断到 96 bit，与 mac 同位。
+
+    无密钥部署用它代替 HMAC：任何一位不同都过不了，所以能拦住"对齐错了几个 bit"的近似解。
+    但拦不住伪造（谁都能算）—— 自检通过只证明"解对了"，不证明"没被改"。
+    """
+    return hashlib.sha256(signed_body(uid, timestamp, page_code, tag)).digest()[:MAC_BYTE_COUNT]
+
+
 class Payload:
     """256 bit 推荐布局：uid + Unix 秒 + 页面短码 + tag + 96 bit mac，字段全小端。"""
 
@@ -396,6 +415,14 @@ class Payload:
         return cls(uid, timestamp, page_code, tag,
                    payload_mac(uid, timestamp, page_code, tag, key))
 
+    @classmethod
+    def self_checked(cls, uid: int, timestamp: int, page_class_name: str,
+                     app: int = 0, environment: int = 0) -> "Payload":
+        """无密钥场景：mac 位置放公开自检值。"""
+        tag = (LAYOUT_VERSION << 28) | ((app & 0xFF) << 20) | ((environment & 0xFF) << 12)
+        page_code = encode_page_code(page_name_code(page_class_name))
+        return cls(uid, timestamp, page_code, tag, self_check(uid, timestamp, page_code, tag))
+
     @property
     def layout_version(self) -> int:
         return self.tag >> 28
@@ -416,6 +443,41 @@ class Payload:
         expected = payload_mac(self.uid, self.timestamp, self.page_code, self.tag, key)
         # 定长比较，不做短路
         return len(self.mac) == len(expected) and hmac.compare_digest(bytes(self.mac), expected)
+
+    @property
+    def is_unsigned(self) -> bool:
+        """mac 全 0：载荷没带任何校验值。"""
+        return all(byte == 0 for byte in self.mac)
+
+    def verification(self, key: bytes | None) -> str:
+        """判定载荷带的是哪种校验值：signed / selfCheck / unsigned / failed。
+
+        没给密钥时签名载荷落在 failed，调用方应报"未校验(需要 --key)"而不是"被篡改"。
+        """
+        if self.is_unsigned:
+            return "unsigned"
+        if key is not None and self.is_valid(key):
+            return "signed"
+        if bytes(self.mac) == self_check(self.uid, self.timestamp, self.page_code, self.tag):
+            return "selfCheck"
+        return "failed"
+
+    @property
+    def is_plausible(self) -> bool:
+        """结构自检：只看布局本身的结构约束，不需密钥也不靠额外字段。
+
+        名义判别力 ≈ 28 bit，但**实测仍会放过近似解**（半块相位错位解出的是真载荷改几个 bit
+        的拷贝，结构字段根本没动），所以只能当"没有任何校验值时的兵底"。
+        """
+        if self.layout_version != LAYOUT_VERSION:
+            return False
+        if self.tag & 0x0FFF:
+            return False
+        if self.page_code >> 60:
+            return False
+        if not PLAUSIBLE_TIMESTAMP[0] <= self.timestamp <= PLAUSIBLE_TIMESTAMP[1]:
+            return False
+        return all(((self.page_code >> (6 * i)) & 0x3F) < len(CODE_ALPHABET) for i in range(CODE_LENGTH))
 
 
 # MARK: - 页面短码
@@ -584,22 +646,56 @@ def load_image(path: str) -> np.ndarray:
         fail(f"读不到图片: {path}（{error}）", 1)
 
 
-def mac_validator(key: bytes):
+def valid_validator(key: bytes | None):
+    """严格校验器：验签通过或公开自检值通过。位数不符一律 false。"""
     def validate(candidate: Decoded) -> bool:
         if candidate.payload_bits != PAYLOAD_BITS:
             return False
         fields = Payload.from_bytes(candidate.payload_bytes)
-        return fields is not None and fields.is_valid(key)
+        return fields is not None and fields.verification(key) in ("signed", "selfCheck")
 
     return validate
 
 
-def timestamp_validator(candidate: Decoded) -> bool:
-    """没有 MAC 时用时间戳合理性做弱校验：Unix 秒落在 2015...2100 之间。"""
+def structural_validator(candidate: Decoded) -> bool:
+    """兜底校验器：结构自检。只减少错误，不消除错误。"""
     if candidate.payload_bits != PAYLOAD_BITS:
         return False
     fields = Payload.from_bytes(candidate.payload_bytes)
-    return fields is not None and 1_420_070_400 <= fields.timestamp <= 4_102_444_800
+    return fields is not None and fields.is_plausible
+
+
+NO_VALIDATOR_WARNING = (
+    "载荷没带可校验的校验值（mac 全 0 或仅有 HMAC 而没给 --key）："
+    "裁剪 / 相位搜索已退化为结构自检，近似解会漏网 —— 结论不保证正确，必须看 弱bit 与 校验 字段；"
+    "接入端填公开自检值（WatermarkPayload.selfChecked）或服务端 HMAC 才能真正保证"
+)
+
+
+def tier_of(result: "Decoded | None", key: bytes | None) -> str | None:
+    if result is None or result.payload_bits != PAYLOAD_BITS:
+        return None
+    fields = Payload.from_bytes(result.payload_bytes)
+    return None if fields is None else fields.verification(key)
+
+
+def decode_with_ladder(image, bits_candidates, planes, key, search_tile: bool = True):
+    """三档阶梯：严格校验器（常规相位）→ 严格校验器（加 block 奇偶）→ 结构自检兜底。
+
+    返回最终结果与它落在哪一档校验上。
+    """
+    strict = valid_validator(key)
+    for search_pair_offset in (False, True):
+        best = decode_best(image, payload_bits_candidates=bits_candidates, planes=planes,
+                           search_phase=True, search_tile=search_tile,
+                           search_pair_offset=search_pair_offset, validate=strict)
+        tier = tier_of(best, key)
+        if tier in ("signed", "selfCheck"):
+            return best, tier
+    warn(NO_VALIDATOR_WARNING)
+    best = decode_best(image, payload_bits_candidates=bits_candidates, planes=planes,
+                       search_phase=True, search_tile=search_tile, validate=structural_validator)
+    return best, tier_of(best, key)
 
 
 def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) -> None:
@@ -626,10 +722,17 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
     else:
         page_line = f"page={code}（无注册表，直接 {grep_hint(code)}）"
 
-    if key is not None:
-        mac_line = "mac=OK" if fields.is_valid(key) else "mac=BAD(密钥不符或被篡改)"
+    # 校验分档必须如实写：自检值通过只证明"解对了"，不证明"没被伪造"
+    verification = fields.verification(key)
+    if verification == "signed":
+        mac_line = "mac=OK(验签)"
+    elif verification == "selfCheck":
+        mac_line = "mac=OK(自检,未验签)"
+    elif verification == "unsigned":
+        mac_line = ("mac=未签名(字段自洽,退结构自检)" if fields.is_plausible
+                    else "mac=未签名(字段不自洽,谨慎)")
     else:
-        mac_line = "mac=未校验(需要 --key)"
+        mac_line = "mac=未校验(需要 --key)" if key is None else "mac=BAD(密钥不符或载荷被改)"
 
     print(
         f"uid={fields.uid}(0x{fields.uid:08X})  time={stamp.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
@@ -660,29 +763,21 @@ def main(argv: list[str]) -> int:
     key = options["key"]
 
     if options["auto"]:
-        validator = mac_validator(key) if key is not None else timestamp_validator
         candidates = [PAYLOAD_BITS]
         if options["payload_bits"] != PAYLOAD_BITS:
             candidates.append(options["payload_bits"])
-        result = decode_best(image, payload_bits_candidates=candidates,
-                             planes=("chroma", "luma"), search_phase=True, validate=validator)
+        result, tier = decode_with_ladder(image, candidates, ("chroma", "luma"), key)
     elif options["auto_offset"]:
-        if key is not None:
-            validator = mac_validator(key)
-            if options["payload_bits"] != PAYLOAD_BITS:
-                warn(f"MAC 只覆盖 {PAYLOAD_BITS} bit 推荐布局，--bits {options['payload_bits']} 下相位无法校验")
-        else:
-            validator = None
-            warn("--auto-offset 没给 --key：只搜块网格相位，tile 平移不搜（等价 rotation 恒 0），"
-                 "只能按 |z| 中位裁决，不保证解出正确载荷；非整 tile 倍数的裁剪（平移）解不了。"
-                 "要覆盖裁剪平移必须给 --key。判读请看 弱bit，配合 --layout 检查字段是否合理")
-        result = decode_best(image, payload_bits_candidates=[options["payload_bits"]],
-                             planes=(options["plane"],), search_phase=True, search_tile=True,
-                             validate=validator)
+        if options["payload_bits"] != PAYLOAD_BITS:
+            warn(f"HMAC 与公开自检值都只覆盖 {PAYLOAD_BITS} bit 推荐布局，"
+                 f"--bits {options['payload_bits']} 下相位与平移无法校验")
+        result, tier = decode_with_ladder(image, [options["payload_bits"]],
+                                          (options["plane"],), key)
     else:
         result = decode(image, payload_bits=options["payload_bits"],
                         offset_x=options["offset"][0], offset_y=options["offset"][1],
                         plane=options["plane"])
+        tier = tier_of(result, key)
 
     if result is None:
         fail("解码失败: 图像太小，或 --auto 没找到可信的候选", 1)
@@ -703,6 +798,9 @@ def main(argv: list[str]) -> int:
     )
     if options["layout"]:
         print_layout(result, key, options["pages"])
+    elif tier == "unsigned":
+        # 没开 --layout 也要提醒：无校验值的载荷在裁剪场景下不可信
+        warn(NO_VALIDATOR_WARNING)
     return 0
 
 

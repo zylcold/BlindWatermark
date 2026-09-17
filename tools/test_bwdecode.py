@@ -117,6 +117,21 @@ def make_payload(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
     return bwdecode.signed_body(fields.uid, fields.timestamp, fields.page_code, fields.tag) + mac
 
 
+def make_self_checked(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
+                      class_name: str = "BHProfileViewController", app: int = 1) -> bytes:
+    """无密钥部署的载荷：mac 位置是公开自检值。"""
+    fields = bwdecode.Payload.self_checked(uid, timestamp, class_name, app=app)
+    return bwdecode.signed_body(fields.uid, fields.timestamp, fields.page_code, fields.tag) + fields.mac
+
+
+def make_unsigned(uid: int = 0x1234_5678, timestamp: int = 1_760_000_000,
+                  class_name: str = "BHProfileViewController", app: int = 1) -> bytes:
+    """像 `mac: []` 那样没带校验值的载荷。"""
+    tag = (bwdecode.LAYOUT_VERSION << 28) | ((app & 0xFF) << 20)
+    page_code = bwdecode.encode_page_code(bwdecode.page_name_code(class_name))
+    return bwdecode.signed_body(uid, timestamp, page_code, tag) + bytes(12)
+
+
 def crop(image: np.ndarray, left: int, top: int) -> np.ndarray:
     return image[top:, left:] if top or left else image
 
@@ -130,6 +145,11 @@ def mac_ok(decoded: bwdecode.Decoded | None) -> bool:
 
 def validator(candidate: bwdecode.Decoded) -> bool:
     return mac_ok(candidate)
+
+
+def tier_of(raw: bytes, key: bytes | None = None) -> str | None:
+    fields = bwdecode.Payload.from_bytes(raw)
+    return None if fields is None else fields.verification(key)
 
 
 # MARK: - 各项检查
@@ -221,6 +241,91 @@ def test_page_codec() -> None:
           == ["BHProfileViewController"], "注册表按短码命中唯一类名")
 
 
+def test_self_check() -> None:
+    print("公开自检值（无密钥部署）")
+    signed = make_payload()
+    checked = make_self_checked()
+    unsigned = make_unsigned()
+
+    check(tier_of(checked, None) == "selfCheck", "自检载荷：无密钥也能判定为自检值通过")
+    check(tier_of(checked, b"") == "selfCheck", "自检载荷：换任何密钥都是自检值通过（不是验签）")
+    check(tier_of(signed, KEY) == "signed", "HMAC 载荷：有密钥时是验签通过")
+    check(tier_of(signed, None) == "failed", 'HMAC 载荷：没密钥时报未校验（调用方应说「需要 --key」）')
+    check(tier_of(unsigned, KEY) == "unsigned", "mac 全 0：报未签名，不能报 BAD")
+
+    # 近似解——半块相位错位解出的就是这种东西：只改几个 bit，结构字段一点没动。
+    # 这正是必须用覆盖全载荷的校验值、而不能只看结构的原因。
+    near_copy = bytearray(checked)
+    near_copy[0] ^= 0b0000_1111
+    fields = bwdecode.Payload.from_bytes(bytes(near_copy))
+    assert fields is not None
+    check(fields.verification(None) == "failed", "近似解（改 4 bit）→ 自检值拦截")
+    check(fields.is_plausible, "同一个近似解→ 结构自检拦不住（这就是结构自检只能当兵底的原因）")
+
+    # 篡改一位也要拦
+    tampered = bytearray(checked)
+    tampered[8] ^= 0x01
+    tampered_fields = bwdecode.Payload.from_bytes(bytes(tampered))
+    assert tampered_fields is not None
+    check(tampered_fields.verification(None) == "failed", "改 pageCode 一位 → 自检值拦截")
+
+
+def test_crop_without_key() -> None:
+    print("无密钥的裁剪自愈（自检值 vs 结构自检）")
+    payload = make_self_checked()
+    image = shot(payload, "chroma", (0, 0), width=640, height=900)
+    cases = [(0, 137), (0, 400), (8, 0), (16, 0), (24, 0), (40, 0), (16, 400)]
+
+    strict_ok = 0
+    for left, top in cases:
+        result, tier = bwdecode.decode_with_ladder(
+            crop(image, left, top), [bwdecode.PAYLOAD_BITS], ("chroma",), None)
+        if result is not None and result.payload_bytes == payload and tier in ("signed", "selfCheck"):
+            strict_ok += 1
+    check(strict_ok == len(cases), f"自检值裁决：{strict_ok}/{len(cases)} 裁剪用例解对")
+
+    # 结构自检的短板不在"这张图上的命中率"，而在它拦不住近似解：
+    # 把 64 相位 × 512 tile 平移全枚举一遍，数"通过校验但不是真解"的假阳性。
+    # 自检值必须为 0（实测），结构自检必然有漏网 —— 这就是 A 方案存在的理由。
+    false_positives = {}
+    for label, check_validator in (("自检值", lambda c: tier_of(c.payload_bytes, None) == "selfCheck"),
+                                   ("结构自检", bwdecode.structural_validator)):
+        sat = bwdecode.integral_image(bwdecode.feature_plane(image, "chroma"))
+        height, width = image.shape[:2]
+        count = 0
+        for oy in range(bwdecode.BLOCK):
+            for ox in range(bwdecode.BLOCK):
+                stats = bwdecode.accumulate(sat, width, height, ox, oy)
+                for rotation in range(bwdecode.PAIRS_PER_TILE):
+                    candidate = bwdecode.fold(stats, bwdecode.PAYLOAD_BITS, rotation)
+                    if candidate.payload_bytes != payload and check_validator(candidate):
+                        count += 1
+        false_positives[label] = count
+    check(false_positives["自检值"] == 0,
+          f"全搜索空间（64×512）里自检值的假阳性 = {false_positives['自检值']}")
+    check(false_positives["结构自检"] > 0,
+          f"同一空间里结构自检的假阳性 = {false_positives['结构自检']}（所以它只能当兵底）")
+
+
+def test_pair_offset() -> None:
+    print("block 奇偶档（横向裁剪是奇数个块）")
+    payload = make_self_checked()
+    image = shot(payload, "chroma", (0, 0), width=640, height=900)
+    strict = bwdecode.valid_validator(None)
+
+    aligned = bwdecode.decode_best(crop(image, 16, 0), planes=("chroma",), validate=strict)
+    assert aligned is not None
+
+    for left in (8, 24, 40):
+        plain = bwdecode.decode_best(crop(image, left, 0), planes=("chroma",), validate=strict)
+        parity = bwdecode.decode_best(crop(image, left, 0), planes=("chroma",),
+                                      search_pair_offset=True, validate=strict)
+        check(plain is not None and plain.payload_bytes == payload, f"left={left} 常规搜索也能解对")
+        check(parity is not None and parity.payload_bytes == payload, f"left={left} 奇偶档解出的载荷不对")
+        check(parity.median_abs_z > plain.median_abs_z,
+              f"left={left} 奇偶档读到真正的 pair（|z| {plain.median_abs_z:.1f} → {parity.median_abs_z:.1f}）")
+
+
 def test_swift_cross_check(payload: bytes) -> None:
     print("与 Swift bwdecode 对账")
     if not os.path.exists(SWIFT_CLI):
@@ -244,6 +349,24 @@ def test_swift_cross_check(payload: bytes) -> None:
         parsed = bwdecode.Payload.from_bytes(ours.payload_bytes)
         assert parsed is not None
         check(f"uid={parsed.uid}(0x{parsed.uid:08X})" in theirs[1], "字段解读一致")
+        check("mac=OK(验签)" in theirs[1], "两侧都报验签通过")
+
+        # 无密钥的裁剪自愈：换成自检载荷，两条实现都必须靠自检值解对
+        checked = make_self_checked()
+        checked_image = shot(checked, "chroma", (0, 0))
+        checked_path = os.path.join(folder, "selfcheck.png")
+        Image.fromarray(checked_image, mode="RGBA").save(checked_path)
+        result = subprocess.run(
+            [SWIFT_CLI, checked_path, "--auto", "--layout"],
+            capture_output=True, text=True, check=True,
+        )
+        check(f"payload=0x{checked.hex()}" in result.stdout.splitlines()[0],
+              "自检载荷：Swift 无密钥也能解对")
+        check("mac=OK(自检,未验签)" in result.stdout, 'Swift 如实报「自检通过（未验签）」')
+        ours_checked, tier = bwdecode.decode_with_ladder(
+            checked_image, [bwdecode.PAYLOAD_BITS], ("chroma",), None)
+        check(ours_checked is not None and ours_checked.payload_bytes == checked
+              and tier == "selfCheck", "自检载荷：Python 无密钥也能解对")
 
         cropped = os.path.join(folder, "cropped.png")
         Image.fromarray(crop(image, 24, 137), mode="RGBA").save(cropped)
@@ -264,6 +387,9 @@ def main() -> int:
         test_crop(payload)
         test_no_watermark()
         test_tamper(payload)
+        test_self_check()
+        test_crop_without_key()
+        test_pair_offset()
         test_page_codec()
         test_swift_cross_check(payload)
     except AssertionError as error:
