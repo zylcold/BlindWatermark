@@ -177,6 +177,9 @@ final class BlockCodecTests: XCTestCase {
         plain.fill((255, 255, 255, 255))
         let decoded = try XCTUnwrap(BlockCodec.decode(plain, payloadBits: 32))
         XCTAssertLessThan(decoded.confidence, 2, "无水印画面不应给出高置信度")
+        // 纯色画面一个可用观测都没有。不能因为「非零 z 里没有小于 3 的」就报全部 bit 显著 ——
+        // 那是把「没测到」当成「测得好」（历史 bug，已固化成断言）
+        XCTAssertEqual(decoded.weakBits, 32, "没有观测的 bit 必须算证据不足")
     }
 
     /// 容量与余量都建立在这组几何常数上，钉住它，改块大小/ tile 大小会立刻炸出来。
@@ -595,6 +598,32 @@ final class AutoDecodeTests: XCTestCase {
         let fields = try XCTUnwrap(WatermarkPayload(bytes: decoded.payloadBytes))
         XCTAssertEqual(fields.uid, payload.uid)
         XCTAssertEqual(fields.pageCode, payload.pageCode)
+    }
+
+    /// 横向裁剪同样是真实的形态（分享时裁左右、拼图裁边）。
+    /// 横向平移在 tile 右边界回卷到本行第 0 列，按线性索引加偏移会跨行（见 `BlockCodec.fold`），
+    /// 只有 1/16 的观测错位 —— z 值照样漂亮、MAC 才看得出来，所以必须固化成回归测试。
+    func testAutoSurvivesHorizontalCrop() throws {
+        let payload = try makePayload()
+        let full = shot(payload: payload.bytes, plane: .chroma, offset: (0, 0))
+        let secret = try key()
+
+        // 16 = 整个 pair；24 = 一个半 pair（块网格能对齐、配对跨了两个 pair）；
+        // 40 = 两 pair 加一个块。三种都必须是 MAC 校验通过的正确载荷。
+        for left in [16, 24, 40] {
+            let cropped = crop(full, top: 0, left: left)
+            let decoded = try XCTUnwrap(BlockCodec.decodeBest(
+                cropped,
+                searchPhase: true,
+                searchTile: true,
+                validate: { candidate in
+                    guard candidate.payloadBits == WatermarkPayload.payloadBits,
+                          let fields = WatermarkPayload(bytes: candidate.payloadBytes) else { return false }
+                    return fields.isValid(key: secret)
+                }
+            ), "left=\(left) 应能靠 tile 平移搜出来")
+            XCTAssertEqual(decoded.payloadBytes, payload.bytes, "left=\(left) 解出的载荷不对")
+        }
     }
 
     /// 只搜相位不搜旋转，裁过的图必然解错 —— 固化这个失败模式，防止有人把旋转搜索删掉

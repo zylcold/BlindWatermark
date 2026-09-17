@@ -434,18 +434,28 @@ public enum BlockCodec {
 
     /// 把按 pair 累积的统计折叠成 per-bit 统计。
     ///
-    /// 极性翻转只是符号，平方和不动，所以一次累加可以按任意位数、任意 tile 旋转反复折叠。
+    /// 极性翻转只是符号，平方和不动，所以一次累加可以按任意位数、任意 tile 平移反复折叠。
     ///
     /// `rotation` 补偿裁剪：裁掉非 256 整数倍的内容会让图案的 tile 原点相对图片平移，
-    /// 观测到的「解码器本地索引 i」其实对应图案的「真实本地索引 (i + rotation) % pairsPerTile」。
+    /// 观测到的「解码器本地索引 i」其实对应图案平移后的索引。
     /// 相位搜索（ox/oy mod 8）只修块对齐，修不了这个平移 —— 修不了的表现就是载荷整体旋转。
+    ///
+    /// 平移必须**按行列分别取模**：横向平移在 tile 右边界回卷到本行第 0 列，
+    /// 而线性索引 `i + 列偏移` 会跨到下一行（i=15 时 15+1=16 落在下一行行首），
+    /// 只有 1/16 的观测错位，z 值照样很高、weakBits 显得正常，最后靠 MAC 才发现错 —— 别退回线性版。
+    /// `rotation` 的编码：`(行偏移) × pairsPerRow + 列偏移`，覆盖全部 32 × 16 种平移。
     private static func fold(_ stats: PairStats, payloadBits: Int, rotation: Int = 0) -> Folded {
         var sums = [Double](repeating: 0, count: payloadBits)
         var sumSquares = [Double](repeating: 0, count: payloadBits)
         var counts = [Int](repeating: 0, count: payloadBits)
+        let rowShift = rotation / pairsPerRow
+        let colShift = rotation % pairsPerRow
 
         for index in 0..<pairsPerTile where stats.counts[index] > 0 {
-            let shifted = (index + rotation) % pairsPerTile
+            let row = index / pairsPerRow
+            let col = index % pairsPerRow
+            let shifted = ((row + rowShift) % blockRowsPerTile) * pairsPerRow
+                + (col + colShift) % pairsPerRow
             let sign = isFlipped(shifted, payloadBits: payloadBits) ? -1.0 : 1.0
             let bit = shifted % payloadBits
             sums[bit] += sign * stats.sums[index]
@@ -474,7 +484,10 @@ public enum BlockCodec {
             scores: scores,
             signal: stats.observed > 0 ? stats.absSum / Double(stats.observed) : 0,
             confidence: sorted.first ?? 0,
-            weakBits: sorted.filter { $0 < 3 }.count,
+            // 注意这里是**全部** bit：完全没有观测的 bit（z == 0）也算证据不足。
+            // 只数「非零里小于 3」的话，纯色画面（所有 d 都低于 minMagnitude）会一个弱 bit
+            // 都没有，被报成「全部 bit 显著」—— 这是把「没测到」当成「测得好」。
+            weakBits: scores.filter { abs($0) < 3 }.count,
             medianAbsZ: sorted.isEmpty ? 0 : sorted[sorted.count / 2]
         )
     }
