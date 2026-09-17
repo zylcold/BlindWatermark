@@ -8,7 +8,9 @@ import BlindWatermarkCore
 //                 [--layout] [--key <hex>] [--pages <json>] [--auto]
 //   --bits    payload 有效位数，默认 256（推荐布局），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
-//   --auto-offset 已知位数 / 平面时自动搜索最优相位
+//   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位 × tile 平移两个自由度。
+//             给了 --key 就用 MAC 裁决，没给只能按 |z| 中位选（置信度不可保证）。
+//             与 --offset 互斥；与 --auto 语义重叠，别一起用
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
 //   --layout  按 256 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
 //   --key     服务端密钥（hex），配合 --layout 校验 mac
@@ -22,11 +24,25 @@ func fail(_ message: String, code: Int32) -> Never {
     exit(code)
 }
 
+func warn(_ message: String) {
+    FileHandle.standardError.write(("警告: " + message + "\n").data(using: .utf8)!)
+}
+
+/// MAC 裁决器：只对推荐布局有意义，位数不符时一律返回 false（宁可让它退回未校验结果，也不要假装验证过）。
+func macValidator(_ key: SymmetricKey) -> (BlockCodec.Decoded) -> Bool {
+    { decoded in
+        guard decoded.payloadBits == WatermarkPayload.payloadBits,
+              let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+        return fields.isValid(key: key)
+    }
+}
+
 var path: String?
 var payloadBits = WatermarkPayload.payloadBits
 var offsetX = 0
 var offsetY = 0
 var autoOffset = false
+var explicitOffset = false
 var plane: WatermarkPlane = .chroma
 var showLayout = false
 var key: SymmetricKey?
@@ -54,6 +70,7 @@ while index < arguments.count {
         }
         offsetX = x
         offsetY = y
+        explicitOffset = true
     case "--auto-offset":
         autoOffset = true
     case "--plane":
@@ -91,6 +108,13 @@ while index < arguments.count {
     index += 1
 }
 
+if autoOffset && explicitOffset {
+    fail("--auto-offset 与 --offset 互斥：前者就是自动求后者，同时给无法判断以哪个为准", code: 2)
+}
+if autoOffset && auto {
+    fail("--auto-offset 与 --auto 语义重叠：--auto 已经穷举相位 / 平面 / 位数，单独用 --auto 即可", code: 2)
+}
+
 if dumpCodes {
     guard let pages else {
         fail("--dump-codes 需要配合 --pages 使用", code: 2)
@@ -119,11 +143,7 @@ let result: BlockCodec.Decoded?
 if auto {
     let validator: ((BlockCodec.Decoded) -> Bool)?
     if let key {
-        validator = { decoded in
-            guard decoded.payloadBits == WatermarkPayload.payloadBits,
-                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
-            return fields.isValid(key: key)
-        }
+        validator = macValidator(key)
     } else {
         // 没有 MAC 可用时用时间戳合理性做弱校验：Unix 秒落在 2015...2100 之间
         validator = { decoded in
@@ -145,17 +165,36 @@ if auto {
     )
 } else {
     if autoOffset {
-        let best = BlockCodec.findBestOffset(in: image, payloadBits: payloadBits, plane: plane)
-        offsetX = best.offsetX
-        offsetY = best.offsetY
+        // 相位与 tile 平移都不确定：块网格相位靠 medianAbsZ 排序，tile 平移只能靠校验器裁决
+        // （错位 / 错旋转同样能给出很干净的自洽载荷，裸穷举不叫搜索，叫猜）。
+        var phaseValidator: ((BlockCodec.Decoded) -> Bool)?
+        if let key {
+            phaseValidator = macValidator(key)
+            if payloadBits != WatermarkPayload.payloadBits {
+                warn("MAC 只覆盖 \(WatermarkPayload.payloadBits) bit 推荐布局，--bits \(payloadBits) 下相位无法校验")
+            }
+        } else {
+            phaseValidator = nil
+            warn("--auto-offset 没给 --key，相位与 tile 平移只能按 |z| 中位裁决，不保证解出正确载荷；"
+                + "判读请看 弱bit，配合 --layout 检查字段是否合理")
+        }
+        result = BlockCodec.decodeBest(
+            image,
+            payloadBitsCandidates: [payloadBits],
+            planes: [plane],
+            searchPhase: true,
+            searchTile: true,
+            validate: phaseValidator
+        )
+    } else {
+        result = BlockCodec.decode(
+            image,
+            payloadBits: payloadBits,
+            offsetX: offsetX,
+            offsetY: offsetY,
+            plane: plane
+        )
     }
-    result = BlockCodec.decode(
-        image,
-        payloadBits: payloadBits,
-        offsetX: offsetX,
-        offsetY: offsetY,
-        plane: plane
-    )
 }
 guard let result else {
     fail("解码失败: 图像太小，或 --auto 没找到可信的候选", code: 1)
