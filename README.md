@@ -70,7 +70,7 @@ Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
 Watermark.install(payload: 0xDEAD_BEEF)
 ```
 
-未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + 时间桶），开箱可跑。
+未设置任何东西时用默认 payload（`identifierForVendor` 哈希 + Unix 秒），开箱可跑。
 
 ### CocoaPods
 
@@ -114,8 +114,10 @@ swift build -c release
 .build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
-`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转 × 2 位数种**，用 MAC 裁决，实测 0.5s。
-平面与位数已经确定、只是相位不确定时用 `--auto-offset`（`--bits` / `--plane` 照样生效，同样穷举相位 × tile 旋转）：
+`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转**（位数默认只有 256，仅当显式给 `--bits` 且 ≠256 时才追加那一种），
+用 MAC 裁决，实测 0.5s。
+平面与位数已经确定、只是相位不确定时用 `--auto-offset`（`--bits` / `--plane` 照样生效）：
+给了 `--key` 才穷举块网格相位 × tile 旋转；没给 `--key` 只穷举块网格相位、rotation 恒 0。
 它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。没给 `--key` 时它只能按 `|z|` 中位裁决，
 **不保证解出正确载荷**，判读必须看 `弱bit`。
 
@@ -137,7 +139,7 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHP
 
 ```
 OK   弱 bit = 0            每 bit 都显著，结论可信
-WEAK 弱 bit <= 32/8 = 4    勉强解出，结论要交叉验证
+WEAK 弱 bit <= payloadBits/8    勉强解出，结论要交叉验证（256 bit 时阈值 = 32）
 NO   弱 bit 更多           画面里大概没有水印
 ```
 
@@ -161,9 +163,11 @@ Agent 用法见 [`.agents/skills/blind-watermark/SKILL.md`](.agents/skills/blind
 **为什么是 256 bit**：10 字符页面短码就要 60 bit，128 bit 装不下；再大每 tile 的重复次数会低于 2，
 「隔一份翻转极性抵消亮度梯度」的机制就失效了（上限见 `BlockCodec.maxPayloadBits`）。
 
-零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）仍会退回旧的 32 bit POC 布局：
-`FNV-1a(identifierForVendor)` 高 16 位 + 10 分钟时间桶低 16 位。它**无法验签、可伪造、设备哈希不可逆**，
-只够跑通链路。**上生产必须换成服务端下发并签名的 payload**，否则拿到水印也定位不到人，还可能被伪造栽赃。
+零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）用 `WatermarkDefaultPayload.currentBytes()`
+拼一个 **256 bit 推荐布局**（不是旧的 32 bit POC 布局）：uid = `fnv1a(identifierForVendor.uuidString)` 的
+完整 32 bit，timestamp = 当前 Unix 秒（**没有 10 分钟时间桶**），pageCode = 0，tag = `layoutVersion << 28`，mac 留空。
+`mac` 为空 ⇒ **无法验签、可伪造**，设备哈希不可逆，只够跑通链路。
+**上生产必须换成服务端下发并签名的 payload**，否则拿到水印也定位不到人，还可能被伪造栽赃。
 
 ## 已验证 / 未验证
 
