@@ -62,7 +62,7 @@ import BlindWatermarkCore
 // 服务端算好 mac 下发完整 32 字节，客户端只管渲染
 Watermark.install(payload: serverIssuedBytes)
 
-// 换页时更新页面索引
+// 换页时更新页面短码
 Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
     pageClassName: type(of: self).description(), key: key).bytes)
 
@@ -107,7 +107,7 @@ swift build -c release
 # 参数确定时（最快，74ms）
 .build/release/bwdecode shot.png --layout --pages Demo/pages.json --key <hex>
 
-# 截图被裁过 / 不确定平面与位数时
+# 截图被裁过 / 不确定平面与位数时（有 --key 用 MAC 裁决；没给 --key 只能用时间戳合理性弱校验，可靠性差一档）
 .build/release/bwdecode shot.png --auto --layout --pages Demo/pages.json --key <hex>
 
 # 打印注册表里每个类名的短码，供人工/agent 对照

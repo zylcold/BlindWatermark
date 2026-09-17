@@ -95,7 +95,7 @@ enum DemoPage: String, CaseIterable, Identifiable {
     }
 }
 
-/// 页脚：把打进去的 uid / 页面索引亮出来，方便肉眼核对解码结果
+/// 页脚：把打进去的 uid / 页面短码亮出来，方便肉眼核对解码结果
 struct PayloadFooter: View {
     let page: DemoPage
 
@@ -124,7 +124,7 @@ struct RootView: View {
         }
         .onAppear {
             DemoWatermark.install(page: selection)
-            selection = selection   // 触发一次 onChange，确保首屏也带页面索引
+            selection = selection   // 触发一次 onChange，确保首屏也带页面短码
         }
         .onChange(of: selection) { page in
             DemoWatermark.update(page: page)

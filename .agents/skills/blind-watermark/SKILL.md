@@ -81,9 +81,9 @@ Watermark.install(payload: serverIssuedPayload)
 ```
 
 要点：
-- 必须用**服务端下发并签名**的 payload。默认布局（IDFV 哈希 + 时间桶）只是 POC，不可逆、可伪造。
+- 必须用**服务端下发并签名**的 payload。默认布局（IDFV 哈希 + Unix 秒）只是 POC，不可逆、可伪造。
 - 服务端下发时把「payload → 用户/设备/时间」写进映射表，否则事后拿到数字也定位不到人。
-- 时间桶变化后图案要刷新。库只在 App 回前台时重画一次，足够（600s 粒度）。
+- 载荷里的时间戳每次都变，图案要刷新。库只在 App 回前台时重画一次，够用。
 - 三个参数 **`payloadBits` / `plane` / `delta`，解码端必须与接入端完全一致**。写进 App 的配置，别靠记忆。
 
 ### 解码端（本 skill）
@@ -209,7 +209,10 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 
 ### 默认 payload 的问题
 
-`(FNV-1a(identifierForVendor) & 0xFFFF) << 16 | 时间桶` 这套默认布局：
+`WatermarkDefaultPayload.currentBytes()` 这套默认布局（256 bit 推荐布局）：
+
+- uid = `fnv1a(identifierForVendor.uuidString)` 的完整 32 bit，`timestamp` = 当前 Unix 秒，
+  `pageCode` = 0，`tag` = `layoutVersion << 28`，`mac` 留空。**没有时间桶、没有 16 bit 截断**。
 
 - 设备哈希**不可逆**，没有映射表就定位不到任何东西
 - **没有签名，可以伪造** —— 攻击者可以埋一个栽赃别人的 payload
