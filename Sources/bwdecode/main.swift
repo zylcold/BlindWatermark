@@ -8,15 +8,18 @@ import BlindWatermarkCore
 //                 [--layout] [--key <hex>] [--pages <json>] [--auto]
 //   --bits    payload 有效位数，默认 256（推荐布局），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
-//   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位 × tile 平移两个自由度。
-//             给了 --key 就用 MAC 裁决，没给只能按 |z| 中位选（置信度不可保证）。
+//   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位。
+//             只有给了 --key 才额外穷举 tile 平移（rotation），用 MAC 裁决；
+//             没给 --key 时只搜块网格相位、rotation 恒 0，只能按 |z| 中位选（置信度不可保证），
+//             非整 tile 倍数的裁剪解不了。
 //             与 --offset 互斥；与 --auto 语义重叠，别一起用
 //   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
 //   --layout  按 256 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
 //   --key     服务端密钥（hex），配合 --layout 校验 mac
 //   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
 //   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
-//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × {128,32} 位数，
+//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × tile 旋转，
+//             位数默认只有 256，只有显式给了 --bits 且 ≠256 才追加那一种；
 //             给了 --key 用 MAC 裁决，没给就退回 medianAbsZ（不如 MAC 可靠）
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -175,8 +178,9 @@ if auto {
             }
         } else {
             phaseValidator = nil
-            warn("--auto-offset 没给 --key，相位与 tile 平移只能按 |z| 中位裁决，不保证解出正确载荷；"
-                + "判读请看 弱bit，配合 --layout 检查字段是否合理")
+            warn("--auto-offset 没给 --key：只搜块网格相位，tile 旋转不搜（等价 rotation 恒 0），"
+                + "只能按 |z| 中位裁决，不保证解出正确载荷；非整 tile 倍数的裁剪（平移）解不了。"
+                + "要覆盖裁剪平移必须给 --key。判读请看 弱bit，配合 --layout 检查字段是否合理")
         }
         result = BlockCodec.decodeBest(
             image,
