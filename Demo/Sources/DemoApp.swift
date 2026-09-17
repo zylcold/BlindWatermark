@@ -47,7 +47,7 @@ enum DemoWatermark {
             uid: demoUID,
             timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
             pageIndex: index,
-            tag: demoTag,
+            appTag: demoTag,
             key: key
         ).bytes
     }

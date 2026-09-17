@@ -21,9 +21,12 @@ LoveLink iOS 端会在整个界面上常驻一层肉眼不可见的色度扰动�
 [127:96] uid        UInt32   用户 ID 原样放，不用截断、不用查表
 [ 95:64] timestamp  UInt32   Unix 秒，精确到秒且够用到 2106 年 —— 不用再换算时间桶
 [ 63:48] pageIndex  UInt16   页面注册表索引，最多 65536 个受监控页面
-[ 47:32] tag        UInt16   App / 端 / 环境 标识
-[ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断
+[ 47:44] magic      UInt4    固定为 0xA（1010b），解码端用 hasMagic 校验 payloadBits 是否与编码端一致
+[ 43:32] appTag     UInt12   App / 端 / 环境 标识，最多 4096 个枚举值
+[ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断；无后端时填 0
 ```
+
+`magic` 是自检机制：解码输出中 `magic=OK` 表示 `payloadBits` 与编码端一致；`magic=BAD` 说明位数传错或图中无水印，其余字段不可信。
 
 换算成字符量的话 128 bit ≈ 16 个 ASCII 字符，但**不要存字符串** —— 用上面的字段化布局。
 
@@ -78,14 +81,14 @@ swift build -c release --package-path "$BW_REPO"
 
 ```bash
 "$BW_REPO/.build/release/bwdecode" shot.png --layout --key <服务端密钥hex>
-# 完整参数: --bits 128 --plane chroma --offset X,Y --layout --key <hex>
+# 完整参数: --bits 128 --plane chroma --offset X,Y --auto-offset --layout --key <hex>
 ```
 
 输出（两行）：
 
 ```
 payload=0xefbeadde123baa6a02000100a56d00a5  payloadBits=128  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=227.8  最弱=16.5  弱bit=0/128  OK(全部 128 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0001)  mac=OK
+uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  appTag=1(0x001)  magic=OK  mac=未校验(需要 --key)
 ```
 
 | 字段 | 含义 |
@@ -97,7 +100,8 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0
 | `signal` | 平均特征差。chroma 默认参数下约 9 |
 | `\|z\|中位` / `最弱` | 各 bit 显著度。128 bit 下实测中位 100~230，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
-| `uid` / `time` / `pageIndex` / `tag` | `--layout` 解出的字段 |
+| `uid` / `time` / `pageIndex` / `appTag` | `--layout` 解出的字段 |
+| `magic` | `OK` = payloadBits 与编码端一致；`BAD` = 位数传错或图中无水印，其余字段不可信 |
 | `mac` | `--key` 给了则校验：`OK` / `BAD` / `未校验` |
 | 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印 |
 
@@ -106,7 +110,7 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0
 1. 先看判定。`NO` → 走下面的排查清单，别硬解读数字。
 2. `WEAK` → 结果可能对，但必须结合日志/用户描述交叉验证。
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
-4. 加 `--layout` 解出 uid / time / pageIndex / tag。
+4. 加 `--layout` 解出 uid / time / pageIndex / appTag，先看 `magic=OK`；`magic=BAD` 说明位数传错。
 5. `pageIndex` 查接入端的页面注册表还原类名 —— 没表就只有数字。
 6. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，128 bit 布局的时间戳
    已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
@@ -119,7 +123,8 @@ import BlindWatermarkCore
 let image = RGBAImage(cgImage: cgImage)!
 let result = BlockCodec.decode(image, payloadBits: 128, plane: .chroma)!
 print(result.payloadBytes)                       // 16 字节
-let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / pageIndex / tag / mac
+let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / pageIndex / appTag / mac
+// fields.hasMagic → true 说明 payloadBits 与编码端一致
 ```
 
 ---
@@ -132,7 +137,7 @@ let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / 
 |---|---|---|
 | **截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | 块边长与平铺周期一起变了。让用户重发**原图** |
 | **拍屏**（另一台手机拍屏幕） | ❌ 解不出 | 摩尔纹 + 几何畸变。需要同步模板或深度学习方案，本仓库不做 |
-| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 给 `--offset`。裁掉顶部 H 像素 → `--offset 0,-H` |
+| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 先用 `--auto-offset` 自动搜索相位；或手动给 `--offset`，裁掉顶部 H 像素 → `--offset 0,-H` |
 | 非整屏截图（只截一部分区域） | ⚠️ 需要补偿 | 同上，给裁剪原点相对整屏的偏移 |
 | 画面里根本没有水印（系统界面、别的 App） | `NO` | 正常，`\|z\|` 中位约 0.5、弱 bit 32/32 |
 | 色度结构恰好是 8px 尺度的画面（对抗样本） | ⚠️ 退化 | 必须判成 `WEAK`/`NO`，不允许静默给错结果（有测试兜底） |
