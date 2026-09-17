@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermarkAutoLoad'
-  s.version          = '1.0.0'
+  s.version          = '2.0.0'
   s.summary          = '盲水印 ObjC +load 自动挂载层'
   s.description      = <<-DESC
     提供一个 ObjC +load 方法，宿主零代码挂载水印层。

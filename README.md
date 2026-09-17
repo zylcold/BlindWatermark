@@ -8,7 +8,7 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 不 hook 截屏 API。截图走 render server 合成，水印窗口的像素天然进产物。
 
 - 载体：512 bit / 64 字节（layout v4），uid + Unix 秒 + build 号 + 15 字符页面短码 + 22 字节 note + 96 bit 校验值
-- 版本：`1.0.0`（[Releases](https://github.com/zylcold/BlindWatermark/releases)；SPM 用 `from: "1.0.0"`，CocoaPods 用 `:tag => '1.0.0'`）
+- 版本：`2.0.0`（[Releases](https://github.com/zylcold/BlindWatermark/releases)；SPM 用 `from: "2.0.0"`，CocoaPods 用 `:tag => '2.0.0'`）
 - 不可见：亮度残差 0.07/255（人眼阈值之下），只压色度平面
 - 抗压缩：8×8 像素块成对差分，块内平坦，JPEG q=0.6 仍可解
 - 解码：`swift run bwdecode shot.png --auto --layout --key <hex>`，整屏截图 0.1 秒
@@ -78,7 +78,7 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 ### Swift Package Manager
 
 ```swift
-.package(url: "git@github.com:zylcold/BlindWatermark.git", from: "1.0.0")
+.package(url: "git@github.com:zylcold/BlindWatermark.git", from: "2.0.0")
 ```
 
 ```swift
@@ -124,8 +124,8 @@ pod 'BlindWatermarkCore',     :path => '/path/to/BlindWatermark'
 pod 'BlindWatermarkAutoLoad', :path => '/path/to/BlindWatermark'
 pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
 
-# 换成 git 源：1.0.0 起仓库有 tag 了
-# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '1.0.0'
+# 换成 git 源：仓库有 tag（1.0.0 起）
+# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '2.0.0'
 ```
 
 注意 podspec 声明 `ios.deployment_target = '13.0'`（仓库平台下限）。Xcode 27 起最低只支持 15.0，

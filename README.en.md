@@ -11,8 +11,8 @@ the watermark window end up in the output by construction.
 
 - Payload: 512 bit / 64 bytes (layout v4) — uid + Unix seconds + build number + 15-character
   page code + 22-byte note + 96-bit check value
-- Version: `1.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
-  `from: "1.0.0"`, CocoaPods uses `:tag => '1.0.0'`)
+- Version: `2.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
+  `from: "2.0.0"`, CocoaPods uses `:tag => '2.0.0'`)
 - Invisible: luma residual 0.07/255 (below the visibility threshold), chroma plane only
 - Survives JPEG: 8×8 px blocks encoded in pairs, flat inside each block; decodes at q=0.6
 - Decoding: `swift run bwdecode shot.png --auto --layout --key <hex>`, ~0.1 s for a full-screen shot
@@ -93,7 +93,7 @@ observations per bit**, so luma is no longer usable at all (see
 ### Swift Package Manager
 
 ```swift
-.package(url: "git@github.com:zylcold/BlindWatermark.git", from: "1.0.0")
+.package(url: "git@github.com:zylcold/BlindWatermark.git", from: "2.0.0")
 ```
 
 ```swift
@@ -144,7 +144,7 @@ pod 'BlindWatermarkAutoLoad', :path => '/path/to/BlindWatermark'
 pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
 
 # Switching to a git source: the repo has tags since 1.0.0
-# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '1.0.0'
+# pod 'BlindWatermarkCore', :git => 'git@github.com:zylcold/BlindWatermark.git', :tag => '2.0.0'
 ```
 
 Note the podspecs declare `ios.deployment_target = '13.0'` (the repo's platform floor). Xcode 27

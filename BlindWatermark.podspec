@@ -1,11 +1,12 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermark'
-  s.version          = '1.0.0'
+  s.version          = '2.0.0'
   s.summary          = '常驻屏上不可见盲水印，截图可解码溯源（设备 / 时间 / 页面）'
   s.description      = <<-DESC
     覆盖 App 全部界面的低幅度色度扰动层，肉眼不可见，截图必然被带上。
     每两个相邻的 8x8 像素块成对差分编码 1 bit，解码只看差值的符号与显著度（z 值），
-    与底色无关，抗 JPEG。载荷 256 bit：uid + Unix 秒 + 页面短码 + 96 bit HMAC。
+    与底色无关，抗 JPEG。载荷 512 bit（layout v4）：uid + Unix 秒 + 构建号 + 15 字符页面短码
+    + 22 字节 note + 96 bit 校验值。
   DESC
   s.homepage         = 'https://github.com/zylcold/BlindWatermark'
   s.license          = { :type => 'MIT', :file => 'LICENSE' }
@@ -22,8 +23,8 @@ Pod::Spec.new do |s|
   # 本地联调：pod 'BlindWatermark', :path => '.'
   s.source_files = 'Sources/BlindWatermark/**/*.swift'
 
-  s.dependency 'BlindWatermarkCore',     '~> 1.0.0'
-  s.dependency 'BlindWatermarkAutoLoad', '~> 1.0.0'
+  s.dependency 'BlindWatermarkCore',     '~> 2.0.0'
+  s.dependency 'BlindWatermarkAutoLoad', '~> 2.0.0'
 
   s.frameworks = 'UIKit', 'CoreGraphics'
 
