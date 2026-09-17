@@ -122,9 +122,11 @@ if dumpCodes {
     guard let pages else {
         fail("--dump-codes 需要配合 --pages 使用", code: 2)
     }
-    print("code  类名")
+    // 列宽取 codeLength + 1：短码最长 10 字符，`padding(toLength:)` 会把超出的截掉，
+    // 列宽给 6 会把 darkmode 显示成 darkmo —— 表是给人/grep 看的，不能截
+    print("code       类名")
     for entry in pages.codeTable {
-        print("\(entry.code.padding(toLength: 6, withPad: " ", startingAt: 0))\(entry.name)")
+        print("\(entry.code.padding(toLength: PageNameCodec.codeLength + 1, withPad: " ", startingAt: 0))\(entry.name)")
     }
     exit(0)
 }
