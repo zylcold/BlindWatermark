@@ -9,7 +9,8 @@ time and page**, which is what you need to identify who reported a problem.
 No screenshot API is hooked. Screenshots are composited by the render server, so the pixels of
 the watermark window end up in the output by construction.
 
-- Payload: 256 bit / 32 bytes — uid + Unix seconds + page name code + 96-bit HMAC
+- Payload: 512 bit / 64 bytes (layout v4) — uid + Unix seconds + build number + 15-character
+  page code + 22-byte note + 96-bit check value
 - Version: `1.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
   `from: "1.0.0"`, CocoaPods uses `:tag => '1.0.0'`)
 - Invisible: luma residual 0.07/255 (below the visibility threshold), chroma plane only
@@ -72,7 +73,7 @@ chroma is the default: the 6/255 luma grid of luma mode is visible up close.
 - Reading is not taking a sign: signed differences are accumulated and divided by the standard
   error to get a z value. The watermark grows linearly with the number of observations, content
   noise decays as `1/√n`. One iPhone 16 screenshot gives each bit ~90 observations
-  (256-bit layout, 2 repetitions per tile).
+  (512-bit layout, 23287 pairs in total).
 
 The decode margin was also measured, not guessed (iPhone 16, 3x, luma mode, 32-bit layout):
 
@@ -83,9 +84,9 @@ The decode margin was also measured, not guessed (iPhone 16, 3x, luma mode, 32-b
 | **8px blocks, delta 6 (luma default)** | **6.4** | **0/32** | **reliable** |
 | no watermark (control) | 0.5 | 32/32 | no false positives |
 
-Those numbers are for the 32-bit layout. The **256-bit layout divides the observations per bit by
-8, and luma is no longer enough** (see [Measured results and limits](#measured-results-and-limits)),
-which is why the defaults are chroma + delta 8.
+Those numbers are for the old 32-bit prototype. The current layout is 512 bit, which **halves the
+observations per bit**, so luma is no longer usable at all (see
+[Measured results and limits](#measured-results-and-limits)) — the defaults are chroma + delta 8.
 
 ## Integration
 
@@ -98,17 +99,19 @@ which is why the defaults are chroma + delta 8.
 ```swift
 import BlindWatermark
 
-// The server computes the MAC and ships all 32 bytes; the client only renders them
+// The server computes the check value and ships all 64 bytes; the client only renders them
 Watermark.install(payload: serverIssuedBytes)
 
 // Deployments without a key (the client builds the payload itself): fill the public self-check
-// value so the decoder can validate without any secret
+// value so the decoder can validate without any secret. build/note come from the caller
+// (CI build number / ticket id) and are optional
 Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
-    pageClassName: type(of: self).description(), app: 1).bytes)
+    build: 202609161722, pageClassName: type(of: self).description(),
+    note: "hotfix-3", app: 1).bytes)
 
-// Update the page name code on navigation
-Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
-    pageClassName: type(of: self).description(), key: key).bytes)
+// Update the page name code on navigation (v4 sets every field at once)
+Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts, build: build,
+    pageClassName: type(of: self).description(), note: note, key: key).bytes)
 
 // The 32-bit convenience entry point still exists
 Watermark.install(payload: 0xDEAD_BEEF)
@@ -167,7 +170,7 @@ only supports 15.0 and above, so building a pod project with it needs the pod ta
 | Parameter | Default | Meaning |
 |---|---|---|
 | `payload` | — | Payload bytes; bit 0 is the lowest bit of `payload[0]` |
-| `payloadBits` | `payload.count × 8` | Number of significant bits, max 256; the decoder must agree |
+| `payloadBits` | `payload.count × 8` | Number of significant bits, max 512 (a v4 payload is always 512); the decoder must agree |
 | `plane` | `chroma` | `chroma` = chroma plane (invisible), `luma` = luma plane (simple but visible) |
 | `delta` (named `alpha` in code) | 8 | Perturbation amplitude. \|d\| at the decoder: ≈ delta in luma, ≈ 1.13×delta in chroma. **Minimum 2** |
 | `offsetX/offsetY` | 0 | Pattern phase when decoding; only needed for cropped screenshots |
@@ -205,7 +208,7 @@ Tile shifts must be searched because cropping off a non-multiple of 256 pixels m
 origin relative to the image; every local pair index shifts, which shows up as a **rotation** of
 the payload (cropping 137 px → 32 bits of rotation). A phase search only fixes block alignment
 (mod 8) and cannot fix that shift: with phase-only search the payload is rotated yet
-self-consistent — median `|z|` is high and weak bits are 0/256, it looks perfectly fine and is
+self-consistent — median `|z|` is high and weak bits are 0/512, it looks perfectly fine and is
 simply wrong. **The only reliable arbiter is the check value.**
 
 ### Validator ladder
@@ -245,8 +248,9 @@ by content: a watermark-free luma plane scores 19 while a watermarked chroma pla
 it would pick the wrong plane.
 
 ```
-payload=0xefbeaddea048aa6acfe14c8e112103090000103059f32c1304708e9619bdb73c  payloadBits=256  平面=chroma  相位=(0,7)  signal=9.17  |z|中位=35.5  最弱=10.0  弱bit=0/256  OK(全部 256 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHPhotoGridViewController  layout=v3 app=1 env=0  mac=OK
+payload=0xefbeaddefab3ab6afa75722c2f00000013714d0b224d2449922449922449920100686f746669782d33000000000000000000000084c6b56fc6e6ac14ed4f3912  payloadBits=512  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=120.6  最弱=2.9  弱bit=1/512  WEAK(1/512 bit 证据不足，结论谨慎)
+uid=3735928559(0xDEADBEEF)  time=2026-09-17 09:33:19 UTC  page=textlist → BHTextListViewController  build=202609161722  note=hotfix-3  layout=v4 app=1 env=0  mac=OK(自检,未验签)
+build 时间: 2026-09-16 17:22（构建方当地墙上时间）
 ```
 
 Read the **weak-bit count** (bits with `|z| < 3`), not the single weakest bit — on real screens the
@@ -254,7 +258,7 @@ z value of individual bits collapses naturally and a global minimum is too harsh
 
 ```
 OK   weak bits = 0                    every bit is significant, conclusion stands
-WEAK weak bits <= payloadBits/8       barely decoded, cross-check the conclusion (= 32 at 256 bits)
+WEAK weak bits <= payloadBits/8       barely decoded, cross-check the conclusion (= 64 at 512 bits)
 NO   more weak bits                   there is probably no watermark in the picture
 ```
 
@@ -265,7 +269,8 @@ numbers anyway.
 An image without a watermark measures a median `|z|` of 0.5 and 32/32 weak bits, well separated
 from watermarked images.
 
-Agent usage: [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL.md).
+Agent usage: decoding in [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL.md),
+integration in [`skills/blind-watermark-integration/SKILL.md`](skills/blind-watermark-integration/SKILL.md).
 
 ### Python decoder (cross-language backup)
 
@@ -287,38 +292,57 @@ Measured (iPhone 16 screenshot, 1179×2556, M1 Pro): 0.21 s for a normal decode,
 feature plane and integral image). It is a mirror: **decoding logic changes must land in both**,
 and `tools/test_bwdecode.py` cross-checks them on the same PNG.
 
-## Default payload layout
+## Payload layout (v4)
 
-`WatermarkPayload.payloadBits` = 256 bit / 32 bytes, all fields little-endian. The doc comment in
-`Sources/BlindWatermarkCore/WatermarkPayload.swift` is authoritative; this is a copy:
+`WatermarkPayload.byteCount` = 64 bytes / `payloadBits` = 512, all fields little-endian. The doc
+comment in `Sources/BlindWatermarkCore/WatermarkPayload.swift` is authoritative; this is a copy:
 
 ```
-[255:224] uid        32   UInt32   user ID, stored verbatim
-[223:192] timestamp  32   UInt32   Unix seconds, second precision
-[191:128] pageCode   64   UInt64   page class name code, 10 × 6-bit characters = 60 bit
-[127: 96] tag        32   UInt32   [31:28] layout version [27:20] app [19:12] env [11:0] reserved
-[ 95:  0] mac        96            HMAC-SHA256(first 20 bytes, server key), truncated
-                                    or SHA-256(first 20 bytes) truncated (public self-check)
-                                    or all zeros (no check value)
+[511:480] uid        32   UInt32   user ID, stored verbatim
+[479:448] timestamp  32   UInt32   Unix seconds (screenshot time)
+[447:384] build      64   UInt64   build number, 12-digit YYYYMMDDHHMM (e.g. 202609161722); 0 = unset
+[383:288] pageCode   96            page class name code, 15 × 6-bit characters = 90 bit (low 6 bits must be 0)
+[287:272] tag        16   UInt16   app(8) + environment(8)
+[271: 96] note      176            custom note, 22 bytes UTF-8, zero padded
+[ 95:  0] check      96            HMAC-SHA256(first 52 bytes, server key) truncated, or SHA-256 (self-check)
 ```
 
-**Why 256 bit**: a 10-character page code alone needs 60 bit, so 128 bit does not fit; going any
-larger pushes the repetitions per tile below 2, breaking the "flip every other copy to cancel the
-luma gradient" mechanism (upper bound in `BlockCodec.maxPayloadBits`).
+**There is no version field**: this is the layout, and changing field boundaries means changing the
+protocol. **v3 (256 bit / 32 bytes) is deprecated** — historical v3 screenshots do not decode with
+this version (see "Known limits").
 
-Zero-touch mode (no `Watermark.install`, no `payloadProvider`) builds a **256-bit recommended
-layout** via `WatermarkDefaultPayload.currentBytes()`: uid = full 32 bits of
-`fnv1a(identifierForVendor.uuidString)`, timestamp = current Unix seconds (**no 10-minute
-bucketing**), pageCode = 0, tag = `layoutVersion << 28`, and the check field holds the **public
-self-check value** (the device hash is irreversible, but at least "decoded correctly" is provable).
-**In production it must be replaced by a server-issued, signed payload**, otherwise the watermark
-cannot identify anyone and can be forged to frame someone.
+**Why 512 bit, and what it costs**: observations per bit = image area / pair area / payloadBits, so
+**doubling the payload halves the margin**. An iPhone 16 screenshot has 23287 pairs → ~45
+observations per bit at 512 bit. Raise `delta` to buy margin back (8 → 10 → 12, measured below);
+shrinking blocks to 4 px would restore 183 observations per bit but fails JPEG q80 in practice, so
+blocks stay at 8 px.
+
+**At 512 bit each tile holds only one copy**, which disables the "flip every other copy to cancel
+content gradients" mechanism. Measured on strong chroma gradients it does not degrade (0/512 weak
+bits), and enlarging the tile to 512 px buys little (weak bits 40 → 32), so the geometry stays at
+tile 256.
+
+**15-character page code**: `BHUserProfileEditViewController → userprofileedit` fits exactly (the
+10-character v3 code truncated it to `userprofil`). The 90 bits used leave 6 bits in the 96-bit field
+that must be zero — the structural check verifies them, buying 6 bits of discrimination for free.
+Collisions only ever yield 2–3 candidates, resolvable with
+`grep -rin "class.*userprofileedit" --include='*.swift'`.
+
+**build and note are supplied by the caller**: build comes from the CI build number (12 digits,
+stored and printed verbatim; the decoder also prints a human-readable time), note carries a ticket
+id or environment description (≤ 22 bytes UTF-8).
+
+Zero-touch mode (no `Watermark.install`, no `payloadProvider`) builds a v4 payload via
+`WatermarkDefaultPayload.currentBytes()`: uid = full 32 bits of `fnv1a(identifierForVendor.uuidString)`,
+timestamp = current Unix seconds, build/pageCode/note empty, and the check field holds the **public
+self-check value**. The device hash is irreversible; **in production this must be replaced by a
+server-issued, signed payload**.
 
 ## Measured results and limits
 
 ### Unit tests
 
-`swift test` covers 46 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+`swift test` covers 48 cases (runs on macOS, no simulator needed): pure white / pure black / mid
 grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
 (vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
 watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
@@ -328,40 +352,40 @@ near-copy aliases being rejected by the self-check but not by the structural che
 restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
 PageRegistry / PageNameCodec.
 
-`python3 tools/test_bwdecode.py` adds 57 checks and cross-checks against the Swift binary on the
+`python3 tools/test_bwdecode.py` adds 74 checks and cross-checks against the Swift binary on the
 same PNG.
 
 ### Per-page simulator measurements
 
-Six very different layouts in `Demo/`, iPhone 16 simulator (iOS 18.6, 1179×2556), payload using
-the Demo's default 256-bit layout (uid `0xDEADBEEF` + current time + page code + real MAC),
-delta 8.
+Six very different layouts in `Demo/`, iPhone 16 simulator (iOS 18.6, 1179×2556), layout v4 payload
+(uid `0xDEADBEEF` + time + build `202609161722` + 15-character code + note), chroma at delta 8
+(default), no key (the check field holds the public self-check value):
 
-chroma mode (**the default**):
+| Page | Content | signal | median \|z\| | weakest | weak bits | Verdict | Check |
+|---|---|---|---|---|---|---|---|
+| plain | near-flat gradient | 9.00 | 120.3 | 4.1 | 0/512 | OK | self-check |
+| white | white + a bit of bubble text | 9.00 | 113.8 | 4.7 | 0/512 | OK | self-check |
+| text | text-dense list | 9.00 | 120.6 | 2.9 | 1/512 | WEAK | self-check |
+| photo | photo grid (synthetic noise + hard edges) | 9.10 | 35.0 | 6.6 | 0/512 | OK | self-check |
+| dark | dark background + dark cards | 9.12 | 113.8 | 1.9 | 4/512 | WEAK | self-check |
+| mixed | white over black + text + a photo | 9.21 | 54.9 | 2.1 | 4/512 | WEAK | self-check |
 
-| Page | Content | signal | median \|z\| | weakest | weak bits | Verdict |
-|---|---|---|---|---|---|---|
-| plain | near-flat gradient | 9.00 | 161.3 | 10.6 | 0/256 | OK |
-| white | white + a bit of bubble text | 9.00 | 161.0 | 9.8 | 0/256 | OK |
-| text | text-dense list | 9.00 | 161.3 | 6.7 | 0/256 | OK |
-| photo | photo grid (synthetic noise + hard edges) | 9.34 | 28.8 | 8.0 | 0/256 | OK |
-| dark | dark background + dark cards | 9.12 | 161.0 | 4.9 | 0/256 | OK |
-| mixed | white over black + text + a photo | 9.12 | 160.6 | 4.8 | 0/256 | OK |
+Compared with the 256-bit layout on the same pages: median `|z|` 161.0 → 120.3, weakest 6.7 → 2.9 —
+**the margin is roughly halved** (twice the payload = half the observations per bit). The WEAK
+verdicts above merely mean "not zero weak bits"; they are far from the 512/8 = 64 threshold, and
+`mac=OK(自检,未验签)` already proves the payload is correct. **At 512 bit, judge by the check value;
+weak bits only tell you about margin.**
 
-On the chroma plane greyscale content is identically zero, so the text page scores as high as the
-flat page. The `photo` page is pulled down by large colourful areas, but every bit is still
-significant.
+Harshest realistic content (springboard photo wallpaper + icons, composited offline on real pixels):
 
-luma mode as a control (same screenshots, 256-bit layout):
+| delta | observations/bit | decoded | median \|z\| | weak bits |
+|---|---|---|---|---|
+| 8 (default) | 45.5 | OK | 9.4 | 32/512 |
+| 10 | 45.5 | OK | 14.9 | 22/512 |
+| 12 | 45.5 | OK | 19.3 | 9/512 |
 
-| delta | Result |
-|---|---|
-| 6 | 4–182/256 weak bits; the text page decodes wrong outright (mac=BAD). **Unusable at 256 bit** |
-| 12 | plain / white / dark decode (`0/256` weak bits), mixed / photo degrade to WEAK but mac=OK, the text page still mac=BAD |
-
-Conclusion: at 256 bits luma's margin is spread too thin, and raising delta makes the luma grid
-visible to the eye. **Use chroma with 256 bits**; if you really need luma, shrink the payload and
-re-measure with `Demo/sweep.sh` first.
+**luma is unusable at 512 bit** (at delta 12: plain 10/512 WEAK, text 139/512 NO, photo 103/512 NO;
+lower delta is worse). luma needs a smaller payload, and re-measurement with `Demo/sweep.sh` first.
 
 > A large `signal` means large content noise and says nothing about decodability (the luma text
 > page scores 20 yet is the worst). What decides is `|z|` and the check value.
@@ -390,6 +414,10 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin 
 ```
 
 ### Known limits
+
+- **layout v3 (256 bit / 32 bytes) is deprecated**: field boundaries changed, so historical v3
+  screenshots no longer decode — an explicit breaking change. To read older images, use the decoder
+  from the 1.0.0 tag.
 
 - **Chroma adversarial samples**: a scene whose chroma structure happens to sit at the 8 px scale
   degrades. `testChromaNeverSilentlyWrongOnAdversarialColorTexture` holds the line — such cases
@@ -425,7 +453,7 @@ Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun s
 `.github/workflows/ci.yml` runs four things on every PR:
 
 1. `swift build` (all targets compile)
-2. `swift test` (46 core test cases)
+2. `swift test` (48 core test cases)
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
    `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
    `swift test` cannot reach on macOS.

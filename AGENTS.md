@@ -36,7 +36,10 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - **不新增第三方依赖。** 只用系统框架：Accelerate、CryptoKit、CoreGraphics、UIKit。
 - **平台下限 iOS 13 / macOS 11**（Demo 是 iOS 15）。用到的新 API 必须满足可用性，必要时 `@available` 兜底。
 - **编解码参数必须两端一致**：`payloadBits` / `plane` / `offset` / 载荷布局。任何一项不一致都会解出自洽但错误的结果。
-- **`mac` 字段是「校验值」，有三种语义**：HMAC-SHA256 截断（有服务端密钥）、SHA-256 截断（无密钥部署的公开自检值，
+- **载荷布局 v4（512 bit / 64 字节）是当前唯一布局**：uid + Unix 秒 + build(12 位十进制) +
+  15 字符页面短码（96 bit 字段，90 bit 有效，低 6 位必须为 0）+ tag + 22 字节 note + 96 bit 校验值。
+  改字段边界 = 换协议、历史截图失效，必须显式说明影响面并同步 README / SKILL。
+- **`校验值` 字段是「校验值」，有三种语义**：HMAC-SHA256 截断（有服务端密钥）、SHA-256 截断（无密钥部署的公开自检值，
   用 `WatermarkPayload.selfChecked` 构造）、全 0（没带校验值）。
   **自检通过 ≠ 验签通过**：它只能拦住"对齐错了几 bit"的近似解，拦不住伪造。
   对外输出必须分档（`mac=OK(验签)` / `mac=OK(自检,未验签)` / `mac=未签名` / `mac=未校验(需要 --key)` / `mac=BAD`），
@@ -79,6 +82,10 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 ## Skill 规范
 
 - Skill 遵循 [Agent Skills 规范](https://agentskills.io/specification)，放在 **`skills/<name>/SKILL.md`**，不放 `.agents/`。
+- 现在有两个 skill，**职责不许重叠**：
+  - `blind-watermark`：**解析**（读截图 → uid/时间/build/页面/note、校验分档、排查解不出）
+  - `blind-watermark-integration`：**接入**（装水印、造载荷、参数与可见性、接入验收）
+  载荷布局是两边共同的契约：改布局必须同时改两个 skill + README 中英。
 - `name` 必须等于父目录名（小写字母、数字、连字符）。
 - `description` 决定何时被加载，写清"做什么 + 什么时候用"，英文或中文均可但要具体。
 - 本地 pi 通过 `.pi/settings.json` 的 `skills: ["../skills"]` 发现；新增 skill 目录即自动生效，无需改配置。

@@ -7,7 +7,7 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 
 不 hook 截屏 API。截图走 render server 合成，水印窗口的像素天然进产物。
 
-- 载体：256 bit / 32 字节，uid + Unix 秒 + 页面短码 + 96 bit HMAC
+- 载体：512 bit / 64 字节（layout v4），uid + Unix 秒 + build 号 + 15 字符页面短码 + 22 字节 note + 96 bit 校验值
 - 版本：`1.0.0`（[Releases](https://github.com/zylcold/BlindWatermark/releases)；SPM 用 `from: "1.0.0"`，CocoaPods 用 `:tag => '1.0.0'`）
 - 不可见：亮度残差 0.07/255（人眼阈值之下），只压色度平面
 - 抗压缩：8×8 像素块成对差分，块内平坦，JPEG q=0.6 仍可解
@@ -59,7 +59,7 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
   两者相加把 `base` 抵消 → `d ≈ ∓alpha`。**与底色无关**，白底、黑底、深色照片都能解。
 - 同一个 bit 的多份重复观测里**隔一份翻转极性**：水印分量同向累加，画面自身的亮度梯度正负相消。
 - 读码不是取符号，而是按带符号差值累加后除以标准误得到 z 值：水印随观测次数线性累加，
-  内容噪声按 `1/√n` 衰减。一张 iPhone 16 截图每 bit 有约 90 次观测（256 bit 布局，每 tile 重复 2 份）。
+  内容噪声按 `1/√n` 衰减。一张 iPhone 16 截图每 bit 有约 45 次观测（512 bit 布局，共 23287 个 pair）。
 
 解码余量也是模拟器实测定的（iPhone 16，3x，luma 模式，32 bit 布局）：
 
@@ -84,16 +84,18 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 ```swift
 import BlindWatermark
 
-// 服务端算好 mac 下发完整 32 字节，客户端只管渲染
+// 服务端算好校验值下发完整 64 字节，客户端只管渲染
 Watermark.install(payload: serverIssuedBytes)
 
 // 没密钥的部署（客户端自己拼载荷）：填公开自检值，解码端没有密钥也能校验
+// build / note 由外部传入（CI 打包号 / 工单号），都是可选的
 Watermark.install(payload: WatermarkPayload.selfChecked(uid: uid, timestamp: ts,
-    pageClassName: type(of: self).description(), app: 1).bytes)
+    build: 202609161722, pageClassName: type(of: self).description(),
+    note: "hotfix-3", app: 1).bytes)
 
-// 换页时更新页面短码
-Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
-    pageClassName: type(of: self).description(), key: key).bytes)
+// 换页时更新页面短码（v4 一次性 set 全部字段）
+Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts, build: build,
+    pageClassName: type(of: self).description(), note: note, key: key).bytes)
 
 // 32 bit 便捷入口仍在
 Watermark.install(payload: 0xDEAD_BEEF)
@@ -145,7 +147,7 @@ pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `payload` | — | 载荷字节，bit 0 在 payload[0] 最低位 |
-| `payloadBits` | `payload.count × 8` | 有效位数，上限 256，解码端必须一致 |
+| `payloadBits` | `payload.count × 8` | 有效位数，上限 512（v4 载荷固定 512），解码端必须一致 |
 | `plane` | `chroma` | `chroma` 压色度平面（不可见），`luma` 压亮度平面（简单但看得见） |
 | `delta`（代码里叫 `alpha`） | 8 | 扰动幅度。解码端看到的 \|d\|：luma 模式 ≈ delta，chroma 模式 ≈ 1.13×delta。**下限 2** |
 | `offsetX/offsetY` | 0 | 解码时的图案相位，截图被裁过才需要 |
@@ -155,10 +157,10 @@ pod 'BlindWatermark',         :path => '/path/to/BlindWatermark'
 
 ```bash
 swift build -c release
-# 参数确定时（最快，0.08s）
+# 参数确定时（最快，0.07s）
 .build/release/bwdecode shot.png --layout --pages Demo/pages.json --key <hex>
 
-# 截图被裁过 / 不确定平面与位数时（0.1s，穷举 + MAC 裁决）
+# 截图被裁过 / 不确定平面时（0.14s，穷举 + 校验值裁决）
 .build/release/bwdecode shot.png --auto --layout --pages Demo/pages.json --key <hex>
 
 # 平面 / 位数已确定，只是相位不确定（裁边但没缩放过）
@@ -168,8 +170,8 @@ swift build -c release
 .build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
-`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 平移**（位数默认只有 256，仅当显式给 `--bits` 且 ≠256 时才追加那一种），
-用校验值裁决，实测 0.1s（iPhone 16 截图，M1 Pro，release 构建）。
+`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 平移**（位数默认 512，显式给别的 `--bits` 时追加那一种），
+用校验值裁决，实测 0.14s（iPhone 16 截图，M1 Pro，release 构建）。
 
 ### 校验阶梯
 
@@ -211,8 +213,9 @@ swift build -c release
 不能按 `signal` 排 —— 它被内容撑大，没水印的 luma 平面能拿 19，带水印的 chroma 才 9，会挑错平面。
 
 ```
-payload=0xefbeaddea048aa6acfe14c8e112103090000103059f32c1304708e9619bdb73c  payloadBits=256  平面=chroma  相位=(0,7)  signal=9.17  |z|中位=35.5  最弱=10.0  弱bit=0/256  OK(全部 256 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHPhotoGridViewController  layout=v3 app=1 env=0  mac=OK
+payload=0xefbeaddefab3ab6afa75722c2f00000013714d0b224d2449922449922449920100686f746669782d33000000000000000000000084c6b56fc6e6ac14ed4f3912  payloadBits=512  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=120.6  最弱=2.9  弱bit=1/512  WEAK(1/512 bit 证据不足，结论谨慎)
+uid=3735928559(0xDEADBEEF)  time=2026-09-17 09:33:19 UTC  page=textlist → BHTextListViewController  build=202609161722  note=hotfix-3  layout=v4 app=1 env=0  mac=OK(自检,未验签)
+build 时间: 2026-09-16 17:22（构建方当地墙上时间）
 ```
 
 判读看**弱 bit 数**（`|z| < 3` 的 bit 个数），不看最弱那一个 —— 真实界面上个别 bit 的 z
@@ -239,7 +242,8 @@ NO   弱 bit 更多           画面里大概没有水印
 
 无水印画面实测 `|z|` 中位 0.5、弱 bit 32/32，与带水印画面分得很开。
 
-Agent 用法见 [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL.md)。
+Agent 用法：解析看 [`skills/blind-watermark/SKILL.md`](skills/blind-watermark/SKILL.md)，
+接入看 [`skills/blind-watermark-integration/SKILL.md`](skills/blind-watermark-integration/SKILL.md)。
 
 ### Python 版解码器（跨语言备份）
 
@@ -254,78 +258,96 @@ python3 tools/bwdecode.py shot.png --auto --layout --pages Demo/pages.json --key
 python3 tools/test_bwdecode.py
 ```
 
-实测（iPhone 16 截图 1179×2556，M1 Pro）：常规解码 0.21s，`--auto` 0.28s。
+实测（iPhone 16 截图 1179×2556，M1 Pro）：常规解码 0.34s，`--auto` 0.52s。
 依赖只有 numpy 与 Pillow（Pillow 读图，numpy 算特征平面与积分图）。
 它只是镜像：**改解码逻辑必须两边一起改**，`tools/test_bwdecode.py` 会在同一张 PNG 上交叉验证。
 
-## 默认 payload 布局
+## 载荷布局（layout v4）
 
-`WatermarkPayload.payloadBits` = 256 bit / 32 字节，字段全小端。
+`WatermarkPayload.byteCount` = 64 字节 / `payloadBits` = 512，字段全小端。
 `Sources/BlindWatermarkCore/WatermarkPayload.swift` 的文档注释是唯一权威，这里是副本：
 
 ```
-[255:224] uid        32   UInt32   用户 ID 原样放
-[223:192] timestamp  32   UInt32   Unix 秒，精确到秒
-[191:128] pageCode   64   UInt64   页面类名短码，10 个 6-bit 字符 = 60 bit
-[127: 96] tag        32   UInt32   [31:28] 布局版本 [27:20] App [19:12] 环境 [11:0] 保留
-[ 95:  0] 校验值     96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断
-                                    或 SHA-256(前 20 字节) 截断（无密钥部署的公开自检值）
-                                    或全 0（没带校验值）
+[511:480] uid        32   UInt32   用户 ID 原样放
+[479:448] timestamp  32   UInt32   Unix 秒（截图时间）
+[447:384] build      64   UInt64   构建号，12 位十进制 YYYYMMDDHHMM（如 202609161722），0 = 未填
+[383:288] pageCode   96           页面类名短码，15 个 6-bit 字符 = 90 bit（低 6 位必须为 0）
+[287:272] tag        16   UInt16   App(8) + 环境(8)
+[271: 96] note      176           自定义 note，22 字节 UTF-8，尾部 0 填充
+[ 95:  0] 校验值     96           HMAC-SHA256(前 52 字节, 服务端密钥) 截断，或 SHA-256 截断（自检值）
 ```
 
-**为什么是 256 bit**：10 字符页面短码就要 60 bit，128 bit 装不下；再大每 tile 的重复次数会低于 2，
-「隔一份翻转极性抵消亮度梯度」的机制就失效了（上限见 `BlockCodec.maxPayloadBits`）。
+**没有版本位**：布局就是这一个，字段边界变了等于换协议。**v3（256 bit / 32 字节）已废弃**，
+历史 v3 截图用本版本解不出来（见「已知边界」）。
 
-零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）用 `WatermarkDefaultPayload.currentBytes()`
-拼一个 **256 bit 推荐布局**：uid = `fnv1a(identifierForVendor.uuidString)` 的完整 32 bit，
-timestamp = 当前 Unix 秒（**没有 10 分钟时间桶**），pageCode = 0，tag = `layoutVersion << 28`，
-校验值 = **公开自检值**（设备哈希不可逆，但至少能自检"解对了"）。
-**上生产必须换成服务端下发并验签的载荷**，否则拿到水印也定位不到人，还可能被伪造栽赃。
+**为什么是 512 bit，代价是什么**：每 bit 的观测次数 = 图像面积 / pair 面积 / payloadBits，
+**载荷翻倍就是余量减半**。iPhone 16 截图共 23287 个 pair：512 bit → 每 bit 约 45 次观测。
+想补余量就调 `delta`（8 → 10 → 12，实测见下），把块缩到 4px 也能把观测拉回 183 次，
+但 4px 块实测过不了 JPEG q80 —— 块只能是 8px。
+
+**512 bit 时每 tile 只放得下 1 份**，"隔一份翻转极性抵消内容梯度"的机制自动关闭。
+实测强色度渐变内容上没退化（弱 bit 0/512）；把 tile 放大到 512 换回该机制收益很小（弱 bit 40→32），
+所以几何保持 tile 256 不变。
+
+**页面短码 15 字符**：`BHUserProfileEditViewController → userprofileedit`（恰好 15 字符，不截断；
+v3 的 10 字符会截成 `userprofil`）。15 字符只用 90 bit，字段留的 96 bit 里多出的 6 bit 必须为 0，
+结构自检顺手查掉 —— 白拿 6 bit 判别力。真撞名也只是拿到 2~3 个候选，
+`grep -rin "class.*userprofileedit" --include='*.swift'` 即可定位。
+
+**build 与 note 都是外部传入**：build 来自 CI 打包号（12 位数字，原样存、原样打；
+解码端另给一行可读时间），note 放工单号/环境描述（≤22 字节 UTF-8）。
+
+零接入模式（没调过 `Watermark.install`、也没设 `payloadProvider`）用
+`WatermarkDefaultPayload.currentBytes()` 拼一个 v4 载荷：uid = `fnv1a(identifierForVendor.uuidString)`
+的完整 32 bit，timestamp = 当前 Unix 秒，build/pageCode/note 留空，校验值 = **公开自检值**。
+设备哈希不可逆；**上生产必须换成服务端下发并验签的载荷**。
 
 ## 实测与边界
 
 ### 单元测试
 
-`swift test` 覆盖 46 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+`swift test` 覆盖 48 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
 JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
 tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
-256 bit 布局回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
+layout v4 回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
 block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
 PageRegistry / PageNameCodec。
 
-`python3 tools/test_bwdecode.py` 另有 57 项检查，并在同一张 PNG 上与 Swift 版对账。
+`python3 tools/test_bwdecode.py` 另有 74 项检查，并在同一张 PNG 上与 Swift 版对账。
 
 ### 模拟器逐页实测
 
-`Demo/` 六个差异很大的版式，iPhone 16 模拟器（iOS 18.6，1179×2556），payload 走 Demo 默认的
-256 bit 布局（uid `0xDEADBEEF` + 当前时间 + 页面短码 + 真 mac），delta 8。
+`Demo/` 六个差异很大的版式，iPhone 16 模拟器（iOS 18.6，1179×2556），
+payload 是 layout v4（512 bit：uid `0xDEADBEEF` + 时间 + build `202609161722` + 15 字符短码 + note），
+chroma + delta 8（默认），无密钥（校验值是公开自检值）：
 
-chroma 模式（**默认**）：
+| 页面 | 内容特征 | signal | \|z\|中位 | 最弱 | 弱 bit | 判定 | 校验 |
+|---|---|---|---|---|---|---|---|
+| plain | 近乎纯色渐变 | 9.00 | 120.3 | 4.1 | 0/512 | OK | 自检通过 |
+| white | 纯白 + 少量气泡文字 | 9.00 | 113.8 | 4.7 | 0/512 | OK | 自检通过 |
+| text | 文字密集列表 | 9.00 | 120.6 | 2.9 | 1/512 | WEAK | 自检通过 |
+| photo | 照片网格（合成噪声 + 硬边缘） | 9.10 | 35.0 | 6.6 | 0/512 | OK | 自检通过 |
+| dark | 深色底 + 深色卡片 | 9.12 | 113.8 | 1.9 | 4/512 | WEAK | 自检通过 |
+| mixed | 上白下黑 + 文字 + 照片 | 9.21 | 54.9 | 2.1 | 4/512 | WEAK | 自检通过 |
 
-| 页面 | 内容特征 | signal | \|z\|中位 | 最弱 | 弱 bit | 判定 |
-|---|---|---|---|---|---|---|
-| plain | 近乎纯色渐变 | 9.00 | 161.3 | 10.6 | 0/256 | OK |
-| white | 纯白 + 少量气泡文字 | 9.00 | 161.0 | 9.8 | 0/256 | OK |
-| text | 文字密集列表 | 9.00 | 161.3 | 6.7 | 0/256 | OK |
-| photo | 照片网格（合成噪声 + 硬边缘） | 9.34 | 28.8 | 8.0 | 0/256 | OK |
-| dark | 深色底 + 深色卡片 | 9.12 | 161.0 | 4.9 | 0/256 | OK |
-| mixed | 上白下黑 + 文字 + 照片 | 9.12 | 160.6 | 4.8 | 0/256 | OK |
+对比 256 bit 布局（同一批版式）：`|z|` 中位 161.0 → 120.3、最弱 6.7 → 2.9，
+**余量大致减半**（payloadBits 翻倍 = 每 bit 观测减半）。上表几个 WEAK 只是弱 bit 不为 0，
+离 512/8 = 64 的阈值还很远，且 `mac=OK(自检,未验签)` 已经确认解对了 ——
+**512 bit 下判读以校验值为准，弱 bit 只作余量参考**。
 
-chroma 下灰阶内容在色度平面上恒为零，所以文字页和纯色页的 `|z|` 一样高；
-`photo` 的 `|z|` 被大面积彩色内容拉低，但每 bit 仍显著。
+最苛刻的真实内容（springboard 照片壁纸 + 图标，离线合成、真机像素）：
 
-luma 模式作为对照（同一批截图，256 bit 布局）：
+| delta | 每 bit 观测 | 解对 | \|z\|中位 | 弱 bit |
+|---|---|---|---|---|
+| 8（默认） | 45.5 | OK | 9.4 | 32/512 |
+| 10 | 45.5 | OK | 14.9 | 22/512 |
+| 12 | 45.5 | OK | 19.3 | 9/512 |
 
-| delta | 结论 |
-|---|---|
-| 6 | 弱 bit 4~182/256，text 页直接解错（mac=BAD）。**256 bit 下不可用** |
-| 12 | plain / white / dark 解对（弱 bit 0/256），mixed / photo 降级为 WEAK 但 mac=OK，text 页仍 mac=BAD |
-
-结论：luma 的余量被 256 bit 摊薄到不够用，而提高 delta 会让那层亮度网格肉眼可见。
-**要 256 bit 就用 chroma**；确需 luma 就只能砍载荷位数，并先跑 `Demo/sweep.sh` 复测这个数字。
+**luma 在 512 bit 下不可用**（delta 12 实测：plain 弱 bit 10/512 WEAK，text 139/512 NO、photo 103/512 NO；
+delta 更小时更差）。luma 只能配更小的载荷，且要先跑 `Demo/sweep.sh` 复测。
 
 > `signal` 大 = 内容噪声大，与能否解出无关（text 页 luma 能拿 20，却是最差的）。
-> 决定成败的是 `|z|` 与 MAC。
+> 决定成败的是 `|z|` 与校验值。
 
 换个版式做接入验收时，先跑 `Demo/sweep.sh` 复测，别照抄这里的数字：
 
@@ -335,6 +357,9 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 
 ```
 
 ### 已知边界
+
+- **layout v3（256 bit / 32 字节）已废弃**：字段边界变了，历史 v3 截图用本版本解不出来 ——
+  这是显式的破坏性变更。需要继续读老图的话，请用 1.0.0 tag 的解码器。
 
 - **chroma 的对抗样本**：色度结构恰好落在 8px 尺度时会退化。
   `testChromaNeverSilentlyWrongOnAdversarialColorTexture` 兜住底线 —— 这种情况必须解不出或置信度低，
@@ -367,7 +392,7 @@ xcrun simctl io booted screenshot /tmp/shot.png
 `.github/workflows/ci.yml` 对每个 PR 跑四件事：
 
 1. `swift build`（全 target 编译）
-2. `swift test`（46 例核心测试）
+2. `swift test`（48 例核心测试）
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
    编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
    编不到那部分。
