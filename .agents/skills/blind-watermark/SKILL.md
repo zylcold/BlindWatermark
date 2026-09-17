@@ -12,35 +12,52 @@ LoveLink iOS 端会在整个界面上常驻一层肉眼不可见的色度扰动�
 
 ---
 
-## 一、容量：128 bit，uid + 时间戳 + 页面 + 校验一次装下
-
-载荷上限 **256 bit**（每 tile 只重复 2 份，刚好还够翻转极性用），推荐 **128 bit**。
-标准布局是 `WatermarkPayload`，字段全小端：
+## 一、容量：256 bit = uid + Unix 秒 + 页面短码 + 校验
 
 ```
-[127:96] uid        UInt32   用户 ID 原样放，不用截断、不用查表
-[ 95:64] timestamp  UInt32   Unix 秒，精确到秒且够用到 2106 年 —— 不用再换算时间桶
-[ 63:48] pageIndex  UInt16   页面注册表索引，最多 65536 个受监控页面
-[ 47:44] magic      UInt4    固定为 0xA（1010b），解码端用 hasMagic 校验 payloadBits 是否与编码端一致
-[ 43:32] appTag     UInt12   App / 端 / 环境 标识，最多 4096 个枚举值
-[ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断；无后端时填 0
+[255:224] uid        32   UInt32   用户 ID 原样放，不用截断、不用查表
+[223:192] timestamp  32   UInt32   Unix 秒，精确到秒且够用到 2106 年
+[191:128] pageCode   64   UInt64   页面类名短码，10 个字符（见下）
+[127: 96] tag        32   UInt32   布局版本(4bit) / App(8bit) / 环境(8bit) / 保留
+[ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断
 ```
 
-`magic` 是自检机制：解码输出中 `magic=OK` 表示 `payloadBits` 与编码端一致；`magic=BAD` 说明位数传错或图中无水印，其余字段不可信。
+32 字节，字段全小端。**256 bit 是上限**（每 tile 512 个 pair，此时每 tile 重复 2 份；
+再大就没法成对翻转极性抵消亮度梯度了）。
 
-换算成字符量的话 128 bit ≈ 16 个 ASCII 字符，但**不要存字符串** —— 用上面的字段化布局。
+实测 256 bit（chroma，iPhone 16，六页弱 bit 全部 0/256）：`|z|` 中位 37~161、最弱 4.9~11.2，
+阈值 3，最紧的一页仍有 1.6 倍余量。若某张图出现十几个弱 bit，通常是截断/压缩痕迹，结合 MAC 判断。
 
-### 页面类名怎么进来
+### 页面类名怎么进来：短码 + grep
 
-`pageIndex` 不是类名（32 字节装不下字符串）。做法：接入端维护「索引 → 类名」注册表，
-页面出现时 `Watermark.update(payload:)` 重画图案（相位不变，解码端无感，微秒级）。
-解码后拿索引查同一张表还原类名。**没有注册表就只能拿到一个数字**，接这类工单前先要到表。
+水印里放的是**从类名算出来的 10 字符短码**，不是索引、更不是完整类名（装不下）。
+它利用 iOS 命名的高冗余，把 `ViewController` 这类每个页面都有的词缀剥掉：
+
+```
+BHProfileViewController        → profile
+BHChatListViewController       → chatlist
+BHLiveRoomViewController       → liveroom
+BHUserProfileEditViewController → userprofil   （超过 10 字符才截断）
+```
+
+拿到短码后 `grep -rin "class.*chatlist" --include='*.swift'` 就能定位类名 —— **不需要注册表**。
+真撞名了也只是拿到 2~3 个候选，结合截图内容判断即可（4 字符时 1000 个页面撞名概率 23%，
+所以扩到了 10 字符：那个数量级下撞名概率可忽略）。
+
+算法（`PageNameCodec`，编解码只有这一份实现）：
+1. 取类名最后一段（丢掉 `Module.` 前缀）
+2. 按长度降序剥**词尾**后缀，最多两层：`ViewController` / `ViewModel` / `Presenter` /
+   `Interactor` / `Controller` / `View` / `Page` / `Screen` / `Scene` / `Cell` / `Item` / `Model` / `VC`
+3. 剥已知 App 前缀：`BH` / `JY` / `LL` / `HW` / `XQ`
+4. 转小写，只留 `a-z0-9`
+5. 取前 10 字符，每字符 6 bit 打包（37 符号表，补位符 `_`）
+
+页面变化时 `Watermark.update(payload:)` 重画图案（相位不变，解码端无感，微秒级）。
 
 ### 密钥归属
 
-**密钥只在服务端持有**：服务端算好 mac 下发完整 16 字节，客户端只负责渲染；解码端 `--key` 校验。
-客户端自己算 mac 等于把密钥交出去。32 bit mac 挡顺手伪造（单次命中 1/2³²），
-挡不住针对性碰撞 —— 对抗强攻击就别塞业务字段，整个载荷做服务端票据。
+**密钥只在服务端持有**：服务端算好 mac 下发完整 32 字节，客户端只负责渲染；解码端 `--key` 校验。
+客户端自己算 mac 等于把密钥交出去。96 bit mac 已足够挡住伪造与针对性碰撞。
 
 ### 余量（实测，chroma，iPhone 16，弱 bit 全部 0/128）
 
@@ -80,15 +97,23 @@ swift build -c release --package-path "$BW_REPO"
 ```
 
 ```bash
-"$BW_REPO/.build/release/bwdecode" shot.png --layout --key <服务端密钥hex>
-# 完整参数: --bits 128 --plane chroma --offset X,Y --auto-offset --layout --key <hex>
+# 常规（最快）
+"$BW_REPO/.build/release/bwdecode" shot.png --layout --pages <页面注册表.json> --key <服务端密钥hex>
+
+# 截图被裁过 / 参数不确定（0.5s，穷举 + MAC 裁决）
+"$BW_REPO/.build/release/bwdecode" shot.png --auto --layout --pages <页面注册表.json> --key <服务端密钥hex>
 ```
+
+**优先用 `--auto` 并带上 `--key`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
+却依然自洽：`|z|` 中位 98、弱 bit 0/128，输出看着完全正常，但 uid/时间/页面全是错的。
+`--auto` 穷举 2 平面 × 64 相位 × 512 tile 旋转 × 位数，只有 MAC 能识别出正确那一组。
+没有 `--key` 时 `--auto` 只能用时间戳合理性做弱校验，可靠性差一个档次 —— **能要到密钥就去要。**
 
 输出（两行）：
 
 ```
-payload=0xefbeadde123baa6a02000100a56d00a5  payloadBits=128  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=227.8  最弱=16.5  弱bit=0/128  OK(全部 128 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  appTag=1(0x001)  magic=OK  mac=未校验(需要 --key)
+payload=0xefbeaddea048aa6acfe14c8e112103090000103059f32c1304708e9619bdb73c  payloadBits=256  平面=chroma  相位=(0,7)  signal=9.17  |z|中位=35.5  最弱=10.0  弱bit=0/256  OK(全部 256 bit 显著)
+uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHPhotoGridViewController  layout=v3 app=1 env=0  mac=OK
 ```
 
 | 字段 | 含义 |
@@ -100,8 +125,7 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  appTag=1(
 | `signal` | 平均特征差。chroma 默认参数下约 9 |
 | `\|z\|中位` / `最弱` | 各 bit 显著度。128 bit 下实测中位 100~230，无水印约 0.5 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
-| `uid` / `time` / `pageIndex` / `appTag` | `--layout` 解出的字段 |
-| `magic` | `OK` = payloadBits 与编码端一致；`BAD` = 位数传错或图中无水印，其余字段不可信 |
+| `uid` / `time` / `page` / `tag` | `--layout` 解出的字段；`page` 是短码，后面带注册表命中或 grep 提示 |
 | `mac` | `--key` 给了则校验：`OK` / `BAD` / `未校验` |
 | 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印 |
 
@@ -110,10 +134,21 @@ uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  appTag=1(
 1. 先看判定。`NO` → 走下面的排查清单，别硬解读数字。
 2. `WEAK` → 结果可能对，但必须结合日志/用户描述交叉验证。
 3. `OK` → 核对 `signal` 与平面是否自洽（chroma 约 9，luma 约等于 delta）。明显偏离说明图案没对上或 `--plane` 给错。
-4. 加 `--layout` 解出 uid / time / pageIndex / appTag，先看 `magic=OK`；`magic=BAD` 说明位数传错。
-5. `pageIndex` 查接入端的页面注册表还原类名 —— 没表就只有数字。
+4. 加 `--layout` 解出 uid / time / page / tag，加 `--pages` 把索引还原成类名。
+   界面提示「索引越界：注册表与截图版本不符」说明注册表和这张截图不是同一版，别硬猜。
 6. uid + time 直接去日志/Sentry 定位问题。旧版 32 bit 布局才需要换算时间桶，128 bit 布局的时间戳
    已经是 Unix 秒，`--layout` 直接给出可读时间，不用再算环绕。
+
+### 页面注册表
+
+接入端 `PageRegistry(names:).index(for: className)` 登记（页面出现顺序即索引），
+`write(to:)` 落盘；解码端 `--pages` 加载同一份 JSON。格式就是字符串数组：
+
+```json
+["BHLoginViewController", "BHProfileViewController", "BHChatListViewController"]
+```
+
+越界返回 `nil` 而不是硬猜类名。表换版本旧截图就对不上，建议带版本号进 git。
 
 ### 直接调用 API
 
@@ -123,8 +158,15 @@ import BlindWatermarkCore
 let image = RGBAImage(cgImage: cgImage)!
 let result = BlockCodec.decode(image, payloadBits: 128, plane: .chroma)!
 print(result.payloadBytes)                       // 16 字节
-let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / pageIndex / appTag / mac
-// fields.hasMagic → true 说明 payloadBits 与编码端一致
+let fields = WatermarkPayload(bytes: result.payloadBytes)
+print(fields.uid, fields.timestamp, fields.pageNameCode)  // pageNameCode 拿去 grep
+
+// 参数不确定时：穷举 + MAC 裁决
+let key = SymmetricKey(hex: serverKeyHex)!
+let best = BlockCodec.decodeBest(image, validate: { decoded in
+    guard let f = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+    return f.isValid(key: key)
+})!
 ```
 
 ---
@@ -137,7 +179,7 @@ let fields = WatermarkPayload(bytes: result.payloadBytes)  // uid / timestamp / 
 |---|---|---|
 | **截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | 块边长与平铺周期一起变了。让用户重发**原图** |
 | **拍屏**（另一台手机拍屏幕） | ❌ 解不出 | 摩尔纹 + 几何畸变。需要同步模板或深度学习方案，本仓库不做 |
-| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 先用 `--auto-offset` 自动搜索相位；或手动给 `--offset`，裁掉顶部 H 像素 → `--offset 0,-H` |
+| 截图被裁剪（裁掉状态栏等） | ⚠️ 需要补偿 | 给 `--offset`。裁掉顶部 H 像素 → `--offset 0,-H` |
 | 非整屏截图（只截一部分区域） | ⚠️ 需要补偿 | 同上，给裁剪原点相对整屏的偏移 |
 | 画面里根本没有水印（系统界面、别的 App） | `NO` | 正常，`\|z\|` 中位约 0.5、弱 bit 32/32 |
 | 色度结构恰好是 8px 尺度的画面（对抗样本） | ⚠️ 退化 | 必须判成 `WEAK`/`NO`，不允许静默给错结果（有测试兜底） |

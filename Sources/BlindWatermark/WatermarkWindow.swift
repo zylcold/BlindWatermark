@@ -8,10 +8,9 @@ import UIKit
 final class WatermarkWindow: UIWindow {
     private let host = UIViewController()
 
-    init(scene: UIWindowScene, pattern: UIImage) {
+    init(scene: UIWindowScene, pattern: UIImage, level: UIWindow.Level) {
         super.init(windowScene: scene)
-        // 盖住业务窗口与系统弹窗；alpha 极低，视觉无影响
-        windowLevel = .alert + 1
+        windowLevel = level
         isOpaque = false
         backgroundColor = .clear
         isUserInteractionEnabled = false

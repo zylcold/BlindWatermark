@@ -30,5 +30,5 @@ for PAGE in plain white text photo dark mixed; do
   sleep 4
   xcrun simctl io "$UDID" screenshot "/tmp/bw_${PLANE}_$PAGE.png" >/dev/null 2>&1
   printf "%-6s " "$PAGE"
-  "$ROOT/.build/release/bwdecode" "/tmp/bw_${PLANE}_$PAGE.png" --plane "$PLANE" --layout | tail -2
+  "$ROOT/.build/release/bwdecode" "/tmp/bw_${PLANE}_$PAGE.png" --plane "$PLANE" --layout --pages "$HERE/pages.json" --key 00112233445566778899aabbccddeeff | tail -2
 done

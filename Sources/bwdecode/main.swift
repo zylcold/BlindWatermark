@@ -4,13 +4,18 @@ import Foundation
 import ImageIO
 import BlindWatermarkCore
 
-// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>]
-//   --bits        payload 有效位数，默认 128（推荐布局），必须与打水印端一致
-//   --offset      图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
-//   --auto-offset 自动搜索最优相位，穷举 blockSize×blockSize 种偏移取 |z| 中位最大的一组
-//   --plane       水印压在哪一平面，默认 chroma，必须与打水印端一致
-//   --layout      按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
-//   --key         服务端密钥（hex），配合 --layout 校验 mac
+// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma]
+//                 [--layout] [--key <hex>] [--pages <json>] [--auto]
+//   --bits    payload 有效位数，默认 128（推荐布局），必须与打水印端一致
+//   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
+//   --auto-offset 已知位数 / 平面时自动搜索最优相位
+//   --plane   水印压在哪一平面，默认 chroma，必须与打水印端一致
+//   --layout  按 128 bit 推荐布局解读字段（uid / 时间 / 页面 / 标签）
+//   --key     服务端密钥（hex），配合 --layout 校验 mac
+//   --pages      页面注册表 JSON（字符串数组），把页面短码换成确定的类名
+//   --dump-codes 只列出注册表里每个类名的短码，不进解码流程
+//   --auto    截图被裁过 / 不确定平面与位数时用：穷举 64 相位 × 双平面 × {128,32} 位数，
+//             给了 --key 用 MAC 裁决，没给就退回 medianAbsZ（不如 MAC 可靠）
 
 func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -25,6 +30,9 @@ var autoOffset = false
 var plane: WatermarkPlane = .chroma
 var showLayout = false
 var key: SymmetricKey?
+var pages: PageRegistry?
+var auto = false
+var dumpCodes = false
 
 var index = 1
 let arguments = CommandLine.arguments
@@ -56,6 +64,17 @@ while index < arguments.count {
         plane = value
     case "--layout":
         showLayout = true
+    case "--pages":
+        index += 1
+        guard index < arguments.count,
+              let registry = PageRegistry(contentsOf: URL(fileURLWithPath: arguments[index])) else {
+            fail("--pages 需要一个可读的 JSON 文件（顶层字符串数组）", code: 2)
+        }
+        pages = registry
+    case "--auto":
+        auto = true
+    case "--dump-codes":
+        dumpCodes = true
     case "--key":
         index += 1
         guard index < arguments.count, let value = SymmetricKey(hex: arguments[index]) else {
@@ -72,8 +91,19 @@ while index < arguments.count {
     index += 1
 }
 
+if dumpCodes {
+    guard let pages else {
+        fail("--dump-codes 需要配合 --pages 使用", code: 2)
+    }
+    print("code  类名")
+    for entry in pages.codeTable {
+        print("\(entry.code.padding(toLength: 6, withPad: " ", startingAt: 0))\(entry.name)")
+    }
+    exit(0)
+}
+
 guard let path else {
-    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>]", code: 2)
+    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>] [--pages <json>] [--auto]", code: 2)
 }
 
 let url = URL(fileURLWithPath: path)
@@ -85,20 +115,46 @@ else {
     fail("读不到图片: \(path)", code: 1)
 }
 
-if autoOffset {
-    let best = BlockCodec.findBestOffset(in: image, payloadBits: payloadBits, plane: plane)
-    offsetX = best.offsetX
-    offsetY = best.offsetY
+let result: BlockCodec.Decoded?
+if auto {
+    let validator: ((BlockCodec.Decoded) -> Bool)?
+    if let key {
+        validator = { decoded in
+            guard decoded.payloadBits == WatermarkPayload.payloadBits,
+                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+            return fields.isValid(key: key)
+        }
+    } else {
+        // 没有 MAC 可用时用时间戳合理性做弱校验：Unix 秒落在 2015...2100 之间
+        validator = { decoded in
+            guard decoded.payloadBits == WatermarkPayload.payloadBits,
+                  let fields = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
+            return (1_420_070_400...4_102_444_800).contains(fields.timestamp)
+        }
+    }
+    result = BlockCodec.decodeBest(
+        image,
+        payloadBitsCandidates: Array(Set([WatermarkPayload.payloadBits, payloadBits])),
+        planes: [.chroma, .luma],
+        searchPhase: true,
+        validate: validator
+    )
+} else {
+    if autoOffset {
+        let best = BlockCodec.findBestOffset(in: image, payloadBits: payloadBits, plane: plane)
+        offsetX = best.offsetX
+        offsetY = best.offsetY
+    }
+    result = BlockCodec.decode(
+        image,
+        payloadBits: payloadBits,
+        offsetX: offsetX,
+        offsetY: offsetY,
+        plane: plane
+    )
 }
-
-guard let result = BlockCodec.decode(
-    image,
-    payloadBits: payloadBits,
-    offsetX: offsetX,
-    offsetY: offsetY,
-    plane: plane
-) else {
-    fail("解码失败: 图像太小", code: 1)
+guard let result else {
+    fail("解码失败: 图像太小，或 --auto 没找到可信的候选", code: 1)
 }
 
 let hex = result.payloadBytes.map { String(format: "%02x", $0) }.joined()
@@ -141,23 +197,42 @@ if showLayout {
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
     formatter.timeZone = TimeZone(identifier: "UTC")
-    let magicLine = fields.hasMagic ? "magic=OK" : "magic=BAD(payloadBits 可能与编码端不一致)"
     let macLine: String
     if let key {
         macLine = fields.isValid(key: key) ? "mac=OK" : "mac=BAD(密钥不符或被篡改)"
     } else {
         macLine = "mac=未校验(需要 --key)"
     }
+    // 新旧布局的 mac 覆盖范围相同（都是前 12 字节），所以旧截图 mac 照样通过，
+    // 但 page/tag 字段边界变了 —— 靠 layout 版本位显式提示，别让 agent 误读。
+    if fields.layoutVersion != WatermarkPayload.layoutVersion {
+        print("注意: 这张截图是 layout=v\(fields.layoutVersion)，当前布局是 v\(WatermarkPayload.layoutVersion)，"
+            + "page/tag 字段边界不同，下面的解读可能是错的")
+    }
+    let code = fields.pageNameCode
+    let pageLine: String
+    if let pages {
+        let hits = pages.matches(code: code)
+        switch hits.count {
+        case 1:
+            pageLine = "page=\(code) → \(hits[0])"
+        case 0:
+            pageLine = "page=\(code)（注册表无命中，换版本或没登记；\(PageNameCodec.grepHint(forCode: code))）"
+        default:
+            pageLine = "page=\(code) → \(hits.count) 个候选: \(hits.joined(separator: ", "))"
+        }
+    } else {
+        pageLine = "page=\(code)（无注册表，直接 \(PageNameCodec.grepHint(forCode: code))）"
+    }
     print(String(
-        format: "uid=%u(0x%08X)  time=%@  pageIndex=%u  appTag=%u(0x%03X)  %@  %@",
+        format: "uid=%u(0x%08X)  time=%@  %@  layout=v%u app=%u env=%u  %@",
         fields.uid,
         fields.uid,
         formatter.string(from: date),
-        fields.pageIndex,
-        fields.appTag,
-        fields.appTag,
-        magicLine,
+        pageLine,
+        fields.layoutVersion,
+        fields.app,
+        fields.environment,
         macLine
     ))
-    print("pageIndex 需查接入端的页面注册表才能还原类名")
 }

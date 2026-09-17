@@ -63,7 +63,8 @@ import BlindWatermarkCore
 Watermark.install(payload: serverIssuedBytes)
 
 // 换页时更新页面索引
-Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts, pageIndex: 3, key: key).bytes)
+Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
+    pageClassName: type(of: self).description(), key: key).bytes)
 
 // 32 bit 便捷入口仍在
 Watermark.install(payload: 0xDEAD_BEEF)
@@ -103,12 +104,29 @@ pod 'BlindWatermark', :path => '/path/to/BlindWatermark'
 
 ```bash
 swift build -c release
-.build/release/bwdecode shot.png --layout --key 00112233445566778899aabbccddeeff
+# 参数确定时（最快，74ms）
+.build/release/bwdecode shot.png --layout --pages Demo/pages.json --key <hex>
+
+# 截图被裁过 / 不确定平面与位数时
+.build/release/bwdecode shot.png --auto --layout --pages Demo/pages.json --key <hex>
+
+# 打印注册表里每个类名的短码，供人工/agent 对照
+.build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
+`--auto` 穷举 **2 平面 × 64 相位 × 512 tile 旋转 × 2 位数种**，用 MAC 裁决，实测 0.5s。
+
+必须搜 tile 旋转的原因：裁掉非 256 整数倍的内容会让图案 tile 原点相对图片平移，
+`localPairIndex` 整体位移，载荷表现为**旋转**（裁 137px → 旋转 32 bit）。
+相位搜索只修块对齐（mod 8），修不了这个平移 —— 只搜相位时载荷旋转且自洽，
+`|z|` 中位照样 98、弱 bit 0/128，看起来完全正常但就是错的。**唯一可靠的裁决是 MAC。**
+
+判读顺序也是这么定的：阶段一按 `|z|` 排出块对齐最好的 16 组，阶段二在这些组上穷举旋转并逐个验 MAC。
+不能按 `signal` 排 —— 它被内容撑大，没水印的 luma 平面能拿 19，带水印的 chroma 才 9，会挑错平面。
+
 ```
-payload=0xefbeadde123baa6a02000100a56d00a5  payloadBits=128  平面=chroma  相位=(0,0)  signal=9.00  |z|中位=227.8  最弱=16.5  弱bit=0/128  OK(全部 128 bit 显著)
-uid=3735928559(0xDEADBEEF)  time=2026-09-16 06:45:38 UTC  pageIndex=2  tag=1(0x0001)  mac=OK
+payload=0xefbeaddea048aa6acfe14c8e112103090000103059f32c1304708e9619bdb73c  payloadBits=256  平面=chroma  相位=(0,7)  signal=9.17  |z|中位=35.5  最弱=10.0  弱bit=0/256  OK(全部 256 bit 显著)
+uid=3735928559(0xDEADBEEF)  time=2026-09-16 07:43:28 UTC  page=photogrid → BHPhotoGridViewController  layout=v3 app=1 env=0  mac=OK
 ```
 
 判读看**弱 bit 数**（`|z| < 3` 的 bit 个数），不看最弱那一个 —— 真实界面上个别 bit 的 z

@@ -1,80 +1,86 @@
 import CryptoKit
 import Foundation
 
-/// 推荐的 128 bit 载荷布局 —— 把 uid、时间戳、页面、校验一次装下。
+/// 推荐的 256 bit 载荷布局 —— uid、时间戳、页面短码、校验一次装下。
 ///
 /// ```
-/// [127:96] uid        UInt32   用户 ID（原样放，不用截断、不用查表）
-/// [ 95:64] timestamp  UInt32   Unix 秒，够用到 2106 年，不用再换算时间桶
-/// [ 63:48] pageIndex  UInt16   页面注册表索引，最多 65536 个受监控页面
-/// [ 47:44] magic      UInt4    固定为 0xA，解码端用来自检 payloadBits 是否与编码端一致
-/// [ 43:32] appTag     UInt12   App / 端 / 环境 标识（最多 4096 个枚举值）
-/// [ 31: 0] mac        UInt32   HMAC-SHA256(前 12 字节, 服务端密钥) 截断；无后端时填 0
+/// [255:224] uid        32   UInt32   用户 ID，原样放，不用截断、不用查表
+/// [223:192] timestamp  32   UInt32   Unix 秒，精确到秒且够用到 2106 年
+/// [191:128] pageCode   64   UInt64   页面类名短码，10 个 6-bit 字符 = 60 bit（高 4 位留 0）
+/// [127: 96] tag        32   UInt32   [31:28] 布局版本 [27:20] App [19:12] 环境 [11:0] 保留
+/// [ 95:  0] mac        96            HMAC-SHA256(前 20 字节, 服务端密钥) 截断到 96 bit
 /// ```
 ///
-/// 字段全小端。`pageIndex` 不是类名本身 —— 32 字节装不下类名字符串，
-/// 由接入端维护「索引 → 类名」注册表，解码端拿索引查表还原。
+/// 共 32 字节，字段全小端。
 ///
-/// **magic 自检**：解码端验证 `hasMagic`，可快速发现 `--bits` 与编码端不一致的情况，
-/// 避免解出高置信度但错误的载荷而无从察觉。
+/// **为什么是 256 bit**：10 字符页面短码要 60 bit，加上 uid/时间/mac 后 128 bit 装不下。
+/// 256 bit 是设计上限 —— 每 tile 512 个 pair，此时每 tile 正好重复 2 份，还是偶数，
+/// 翻转极性抵消亮度梯度这一机制仍然成立（再大就没法成对相消了）。
+/// 实测 256 bit 在 chroma 模式下每 bit 仍有约 91 次观测，余量足够。
 ///
-/// **密钥只在服务端持有**：服务端算好 mac 下发完整 16 字节，客户端只负责渲染；
-/// 解码端拿 `--key` 校验。无后端模式下 mac 填 0 即可。
+/// **页面为什么存短码而不是索引**：索引必须配一张同版本的注册表，表一换历史截图就废；
+/// 短码是从类名推出来的，拿着 `chatlist` 直接 `grep -rin "class.*chatlist"` 就能定位。
+///
+/// **密钥只在服务端持有**：服务端算好 mac 下发完整 32 字节，客户端只负责渲染；
+/// 解码端拿 `--key` 校验。客户端自己算 mac 等于把密钥交出去，只防君子。
 public struct WatermarkPayload: Equatable {
-    public static let byteCount = 16
-    public static let payloadBits = 128
-
-    /// tag 字段高 4 bit 的固定魔数。解码端用 `hasMagic` 校验，
-    /// 不符说明 `payloadBits` 与编码端不一致、图像不含水印或载荷损坏。
-    public static let magic: UInt16 = 0xA
+    public static let byteCount = 32
+    public static let payloadBits = 256
+    /// 当前布局版本，写进 tag 高 4 位
+    public static let layoutVersion: UInt32 = 3
+    /// mac 长度
+    public static let macByteCount = 12
+    /// mac 覆盖的字节数（uid + timestamp + pageCode + tag）
+    static let signedByteCount = 20
 
     public var uid: UInt32
     public var timestamp: UInt32
-    public var pageIndex: UInt16
-    /// 原始 tag 字段：高 4 bit 为 `magic`，低 12 bit 为业务标签 `appTag`。
-    /// 直接构造时请用 `init(uid:timestamp:pageIndex:appTag:mac:)` 以自动嵌入 magic。
-    public var tag: UInt16
-    public var mac: UInt32
+    /// 60 bit 有效（10 个 6-bit 字符），高 4 位保留为 0
+    public var pageCode: UInt64
+    /// 布局版本 / App / 环境
+    public var tag: UInt32
+    /// 96 bit（12 字节）
+    public var mac: [UInt8]
 
-    /// 业务标签（tag 低 12 bit，0–4095）。
-    public var appTag: UInt16 { tag & 0x0FFF }
-
-    /// 高 4 bit 是否等于 `magic`。
-    /// 解码后第一步就应检查此属性；不符时请勿相信其余字段。
-    public var hasMagic: Bool { (tag >> 12) == Self.magic }
-
-    // MARK: - 构造
-
-    /// 底层构造，保留 tag 原值。用于从字节流反序列化。
-    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, tag: UInt16, mac: UInt32) {
+    public init(uid: UInt32, timestamp: UInt32, pageCode: UInt64, tag: UInt32, mac: [UInt8]) {
         self.uid = uid
         self.timestamp = timestamp
-        self.pageIndex = pageIndex
+        self.pageCode = pageCode & 0x0FFF_FFFF_FFFF_FFFF
         self.tag = tag
         self.mac = mac
     }
 
-    /// 推荐构造：自动将 magic 嵌入 tag 高 4 bit。`appTag` 只取低 12 bit。
-    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, appTag: UInt16 = 0, mac: UInt32) {
-        let tagWithMagic = (Self.magic << 12) | (appTag & 0x0FFF)
-        self.init(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tagWithMagic, mac: mac)
-    }
-
-    /// 算好 mac 再构造（服务端用）。客户端别拿这个入口。
-    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, tag: UInt16, key: SymmetricKey) {
+    /// 算好 mac 再构造。给服务端用；客户端别拿这个入口。
+    public init(uid: UInt32, timestamp: UInt32, pageCode: UInt64, tag: UInt32, key: SymmetricKey) {
+        let rounded = pageCode & 0x0FFF_FFFF_FFFF_FFFF
         self.init(
             uid: uid,
             timestamp: timestamp,
-            pageIndex: pageIndex,
+            pageCode: rounded,
             tag: tag,
-            mac: WatermarkPayload.mac(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tag, key: key)
+            mac: WatermarkPayload.mac(uid: uid, timestamp: timestamp, pageCode: rounded, tag: tag, key: key)
         )
     }
 
-    /// 嵌入 magic + HMAC 的构造（服务端用）。
-    public init(uid: UInt32, timestamp: UInt32, pageIndex: UInt16, appTag: UInt16 = 0, key: SymmetricKey) {
-        let tagWithMagic = (Self.magic << 12) | (appTag & 0x0FFF)
-        self.init(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tagWithMagic, key: key)
+    /// 从类名直接构造，短码由 `PageNameCodec` 算。
+    public init(
+        uid: UInt32,
+        timestamp: UInt32,
+        pageClassName: String,
+        app: UInt32 = 0,
+        environment: UInt32 = 0,
+        key: SymmetricKey
+    ) {
+        let tag = (WatermarkPayload.layoutVersion << 28)
+            | ((app & 0xFF) << 20)
+            | ((environment & 0xFF) << 12)
+        self.init(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: PageNameCodec.encode(PageNameCodec.code(for: pageClassName)),
+            tag: tag,
+            key: key
+        )
     }
 
     public init?(bytes: [UInt8]) {
@@ -82,10 +88,15 @@ public struct WatermarkPayload: Equatable {
         func u32(_ o: Int) -> UInt32 {
             UInt32(bytes[o]) | UInt32(bytes[o + 1]) << 8 | UInt32(bytes[o + 2]) << 16 | UInt32(bytes[o + 3]) << 24
         }
-        func u16(_ o: Int) -> UInt16 {
-            UInt16(bytes[o]) | UInt16(bytes[o + 1]) << 8
-        }
-        self.init(uid: u32(0), timestamp: u32(4), pageIndex: u16(8), tag: u16(10), mac: u32(12))
+        var code: UInt64 = 0
+        for i in 0..<8 { code |= UInt64(bytes[8 + i]) << (8 * UInt64(i)) }
+        self.init(
+            uid: u32(0),
+            timestamp: u32(4),
+            pageCode: code,
+            tag: u32(16),
+            mac: Array(bytes[20..<32])
+        )
     }
 
     public var bytes: [UInt8] {
@@ -97,35 +108,61 @@ public struct WatermarkPayload: Equatable {
             UInt8(timestamp & 0xFF), UInt8((timestamp >> 8) & 0xFF),
             UInt8((timestamp >> 16) & 0xFF), UInt8((timestamp >> 24) & 0xFF),
         ])
-        out.append(UInt8(pageIndex & 0xFF))
-        out.append(UInt8((pageIndex >> 8) & 0xFF))
-        out.append(UInt8(tag & 0xFF))
-        out.append(UInt8((tag >> 8) & 0xFF))
+        for i in 0..<8 { out.append(UInt8((pageCode >> (8 * UInt64(i))) & 0xFF)) }
         out.append(contentsOf: [
-            UInt8(mac & 0xFF), UInt8((mac >> 8) & 0xFF), UInt8((mac >> 16) & 0xFF), UInt8((mac >> 24) & 0xFF),
+            UInt8(tag & 0xFF), UInt8((tag >> 8) & 0xFF),
+            UInt8((tag >> 16) & 0xFF), UInt8((tag >> 24) & 0xFF),
         ])
+        var macBytes = mac
+        if macBytes.count < WatermarkPayload.macByteCount {
+            macBytes.append(contentsOf: [UInt8](
+                repeating: 0,
+                count: WatermarkPayload.macByteCount - macBytes.count
+            ))
+        }
+        out.append(contentsOf: macBytes.prefix(WatermarkPayload.macByteCount))
         return out
     }
 
+    /// 10 字符页面短码，拿去 grep 类名
+    public var pageNameCode: String { PageNameCodec.decode(pageCode) }
+
+    public var layoutVersion: UInt32 { tag >> 28 }
+    public var app: UInt32 { (tag >> 20) & 0xFF }
+    public var environment: UInt32 { (tag >> 12) & 0xFF }
+
     public func isValid(key: SymmetricKey) -> Bool {
-        mac == WatermarkPayload.mac(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tag, key: key)
+        let expected = WatermarkPayload.mac(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: pageCode,
+            tag: tag,
+            key: key
+        )
+        // 定长比较，避免因为长度差异提前返回
+        guard mac.count == expected.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<expected.count { diff |= mac[i] ^ expected[i] }
+        return diff == 0
     }
 
-    /// 前 12 字节的 HMAC-SHA256 截断到 32 bit。
-    /// 32 bit 意味着伪造者单次尝试的命中概率是 1/2^32，够挡住顺手伪造，挡不住针对性碰撞 ——
-    /// 真要对抗强攻击，把 mac 换成整个 128 bit 都拿来做校验（uid/时间/页面走服务端表）。
+    /// 前 20 字节的 HMAC-SHA256 截断到 96 bit。
     public static func mac(
         uid: UInt32,
         timestamp: UInt32,
-        pageIndex: UInt16,
-        tag: UInt16,
+        pageCode: UInt64,
+        tag: UInt32,
         key: SymmetricKey
-    ) -> UInt32 {
-        var body = WatermarkPayload(uid: uid, timestamp: timestamp, pageIndex: pageIndex, tag: tag, mac: 0).bytes
-        body.removeLast(4)
+    ) -> [UInt8] {
+        let body = WatermarkPayload(
+            uid: uid,
+            timestamp: timestamp,
+            pageCode: pageCode,
+            tag: tag,
+            mac: []
+        ).bytes.prefix(signedByteCount)
         let code = HMAC<SHA256>.authenticationCode(for: Data(body), using: key)
-        let raw = [UInt8](code)
-        return UInt32(raw[0]) | UInt32(raw[1]) << 8 | UInt32(raw[2]) << 16 | UInt32(raw[3]) << 24
+        return Array([UInt8](code).prefix(macByteCount))
     }
 }
 
