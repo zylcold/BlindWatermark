@@ -13,7 +13,9 @@ the watermark window end up in the output by construction.
   page code + 22-byte note + 96-bit check value
 - Version: `2.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
   `from: "2.0.0"`, CocoaPods uses `:tag => '2.0.0'`)
-- Invisible: luma residual 0.07/255 (below the visibility threshold), chroma plane only
+- Invisible (**luma axis only**): luma residual 0.07/255 (below the visibility threshold), chroma
+  plane only; the chroma axis swings by `delta` (8/255 at the default 8), so a faint checkerboard is
+  still visible on large flat or gradient areas — lower `delta` to make it fainter (table below)
 - Survives JPEG: 8×8 px blocks encoded in pairs, flat inside each block; decodes at q=0.6
 - Decoding: `swift run bwdecode shot.png --auto --layout --key <hex>`, ~0.1 s for a full-screen shot
 
@@ -47,6 +49,11 @@ composite equals the luma difference of the overlay colours in premultiplied spa
 not decay with alpha. `p` therefore has to hit that ratio exactly — at `a=6` rounding yields
 `p=0`, i.e. pure black paired with pure blue, a 0.68/255 luma step, and the grid becomes visible.
 `a=8, p=1` is the sweet spot with a 0.026/255 residual.
+
+**That 0.026/255 is the luma axis only**: the chroma axis swings by `delta` itself (8/255 at
+a=8, about 3% of full scale) as a 2.67 pt checkerboard across the screen, so on large flat or
+gradient areas the eye does see a faint blue / pink grid. "Invisible" means luma-invisible, not
+chroma-invisible; if the grid bothers you, **lower `delta`** instead of touching the companion `p`.
 
 Measured on an iPhone 16 simulator (plain page, horizontal band with no gradient inside it, so
 what is measured is the watermark alone):
@@ -515,7 +522,7 @@ let payload = WatermarkPayloadV52(
     buildTime: UInt64(Date().timeIntervalSince1970),
     pageClassName: "BHProfileViewController", app: 42, note: "hotfix"
 )!
-Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
+Watermark.installV52(payload: payload, delta: 4, plane: .chroma)   // v5.2 defaults to delta 4
 // On navigation: Watermark.updateV52(payload: nextPayload)
 ```
 
@@ -565,6 +572,29 @@ synthetic grey background, chroma, alpha=8, tiled PNG; timing includes the state
 | simulator E2E | 1179×2556 iPhone 16 (iOS 18.6) simulator screenshot, six Demo layouts, `--protocol v5.2 --auto` | 6/6 payloads equal, `correctedBits=0`, `candidateCount=1`, 76 minimum observations/bit |
 | simulator crop | same screenshot minus 24 px left / 137 px top | payload equal, phase=(8,7) |
 | simulator floor | 300×300 crop of the same screenshot | `TOO_SMALL`, `--layout` refused (exit 1) |
+
+#### Visibility versus delta (iPhone 16 simulator / iOS 18.6, 1179×2556, flat gradient page)
+
+Pixels are classified as dark / light from the decoded payload, then the on-screen colour difference
+is measured directly. The chroma amplitude equals `delta`; the luma axis is cancelled by the companion
+colour (`p = round(0.114·delta/0.886)`, which rounds to 1 anywhere in 2...8):
+
+| delta | ΔR / ΔG | ΔB | ΔLuma | v5.2, six layouts | \|z\| median (worst page: photo) |
+| --- | --- | --- | --- | --- | --- |
+| 8 (old default) | +1 | −8/255 | 0.35/255 | 6/6, `correctedBits=0` | 42 |
+| 6 | +1 | −6/255 | 0.50/255 | 6/6, `correctedBits=0` | 28 |
+| **4 (v5.2 default)** | **+1** | **−4/255** | **0.64/255** | **6/6, `correctedBits=0`** | **14** |
+| 2 | +1 | −2/255 | 0.78/255 | 6/6, `correctedBits=0` | 36 |
+
+Observation counts are geometry, not amplitude (all six pages report `minObs=76`); the `|z|` median also
+depends on the page content and the payload pattern of that run, so the photo page landed anywhere
+between 14 and 42 across four runs — treat the column as a margin indicator, not a monotone curve.
+
+v4 for comparison (same page, same delta 8, same palette: ΔB=−8/255): v4 spends twice the observations
+per bit, so its six layouts still report `mac=OK(验签)` at delta=6, while delta=4 pushes the dark/mixed
+pages to 19/512 weak bits. That is why **v5.2 defaults to 4** while **v4 keeps its historical default
+8** (use 6 when you want a fainter grid, after re-checking on a device). Any delta change needs the
+device + darkest-page visibility pass from the integration skill.
 
 These are synthetic PNG protocol/geometry measurements. They do not establish device, JPEG, P3/sRGB,
 OLED-visibility, or messenger acceptance; the Demo and manual visibility pass still require Xcode and a

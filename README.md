@@ -9,7 +9,8 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 
 - 载体：512 bit / 64 字节（layout v4），uid + Unix 秒 + build 号 + 15 字符页面短码 + 22 字节 note + 96 bit 校验值
 - 版本：`2.0.0`（[Releases](https://github.com/zylcold/BlindWatermark/releases)；SPM 用 `from: "2.0.0"`，CocoaPods 用 `:tag => '2.0.0'`）
-- 不可见：亮度残差 0.07/255（人眼阈值之下），只压色度平面
+- 不可见（**只指亮度轴**）：亮度残差 0.07/255（人眼阈值之下），只压色度平面；色度轴极差 = `delta`，
+  默认 8 → 8/255，大块纯色 / 渐变页上仍能看见淡色棋盘格，要更淡就减 delta（见下文实测表）
 - 抗压缩：8×8 像素块成对差分，块内平坦，JPEG q=0.6 仍可解
 - 解码：`swift run bwdecode shot.png --auto --layout --key <hex>`，整屏截图 0.1 秒
 
@@ -40,6 +41,10 @@ iOS 屏上盲水印：整个 App 界面常驻一层肉眼不可见的色度扰�
 关键在混色是**预乘 alpha 的线性运算**：合成分的亮度差等于叠加色在预乘空间的亮度差，不随 alpha 衰减。
 所以 `p` 必须精确到这个比例 —— `a=6` 时取整会得 `p=0`，等于拿纯黑去配纯蓝，亮度差 0.68/255，网格立刻显形。
 `a=8, p=1` 这组最好，残差 0.026/255。
+
+**但 0.026/255 只是亮度轴**：色度轴的极差就等于 `delta`（a=8 → 8/255，约 3% 满量程），
+以 2.67pt 的棋盘格铺满整屏 —— 大块纯色或渐变区域上肉眼就是能看出淡蓝 / 淡粉的格子。
+「不可见」指的是亮度轴，不是色度轴；嫌格子明显就**减 delta**，别去动陪色 `p`。
 
 实测（iPhone 16 模拟器，plain 页水平条带，条带内背景无渐变，量到的是纯水印）：
 
@@ -456,7 +461,7 @@ let payload = WatermarkPayloadV52(
     buildTime: UInt64(Date().timeIntervalSince1970),
     pageClassName: "BHProfileViewController", app: 42, note: "hotfix"
 )!
-Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
+Watermark.installV52(payload: payload, delta: 4, plane: .chroma)   // v5.2 默认 delta 也是 4
 // 换页时：Watermark.updateV52(payload: nextPayload)
 ```
 
@@ -501,6 +506,26 @@ PNG，数据 tile 平铺；时间包含相应的搜索参数）：
 | 模拟器全量 | iPhone 16（iOS 18.6）模拟器 1179×2556 截图，Demo 六个版式，`--protocol v5.2 --auto` | 6/6 payload 一致，`correctedBits=0`，`candidateCount=1`，最少 76 次/bit |
 | 模拟器裁剪 | 同一张截图左 24 px / 上 137 px | payload 一致，phase=(8,7) |
 | 模拟器小图 | 同一张截图裁到 300×300 | `TOO_SMALL`，拒绝 `--layout`（exit 1） |
+
+#### 可见性与 delta（iPhone 16 模拟器 / iOS 18.6，1179×2556，纯色渐变页）
+
+按解码出的 payload 把像素分成 dark / light 块，直接量屏幕上的色差。色度轴幅度 = `delta`，
+亮度轴已被陪色匹配掉（`p = round(0.114·delta/0.886)`，2...8 之间都取整到 1）：
+
+| delta | ΔR / ΔG | ΔB | ΔLuma | v5.2 六版式解码 | \|z\| 中位（最差的 photo 页） |
+| --- | --- | --- | --- | --- | --- |
+| 8（旧默认） | +1 | −8/255 | 0.35/255 | 6/6，`correctedBits=0` | 42 |
+| 6 | +1 | −6/255 | 0.50/255 | 6/6，`correctedBits=0` | 28 |
+| **4（v5.2 默认）** | **+1** | **−4/255** | **0.64/255** | **6/6，`correctedBits=0`** | **14** |
+| 2 | +1 | −2/255 | 0.78/255 | 6/6，`correctedBits=0` | 36 |
+
+观测数由几何决定，与 delta 无关（六页都 `minObs=76`）；`|z|` 中位受内容与本次 payload 图案影响，
+photo 页在四次运行里落在 14~42，所以这列只当余量参考，不是单调曲线。
+
+v4 对照（同页、同 delta 8 实测同样是 ΔB=−8/255，两套协议配色相同）：v4 的 512 bit 每 bit 观测只有
+v5.2 的一半，六版式在 delta=6 时仍全部 `mac=OK(验签)`，delta=4 时 dark/mixed 弱 bit 涨到 19/512。
+所以 **v5.2 默认 4**，**v4 保持历史默认 8**（要更不显眼用 6，先在真机复测再定）。改 delta 后都要
+按接入 skill 走一遍真机 + 最暗页面的可见性验收。
 
 上述结果是合成 PNG 上的协议/几何验证，不代表真机、JPEG、P3/sRGB、OLED 可见性或 IM 转发通过；Demo 真机与
 人工可见性仍需在有 Xcode 和设备的环境中补测。

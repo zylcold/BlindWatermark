@@ -58,6 +58,7 @@ Demo/sweep.sh [UDID] [delta] [luma|chroma] [v4|v52]   # 逐页截图解码对比
 - **v5.2 的证据门槛与 v4 同一把尺（每 bit 观测 ≥ 5 次），且没有「带校验值就放行」的例外**：CRC24 只是完整性自检，不是验签。`V52Codec.Decoded.hasSufficientEvidence` 低于门槛时，CLI 必须输出 `TOO_SMALL(...)` 并把 `minObs` / `avgObs` / `|z|中位` 打进第一行；带 `--layout` 一律 exit 1 拒答，不带 `--layout` 只警告不解读字段。输出里不得出现 `mac=`（v5.2 没有 HMAC），CRC 档写作 `crcStatus=OK(完整性自检,未验签)`。
 - v5.2 的 `V52SyncMode.pn/separated` 是 pilot 实验档，默认 `.none`，且**只作用于 chroma**（luma 平面把亮度通道全给数据，此时不写导频、`pilotScore` 无意义，CLI 要打警告）；实验档的公共亮度调制会记录亮度残差，不得宣称不可见或已通过人工验收。缩放搜索为 0.50...1.50 连续粗网格加图像跨度相关的局部精搜，0.837/1.173 等比例必须作为未列入粗网格的测试。裁剪搜索不接受负 `--offset`（两端一致返回 nil），相位由解码器自己搜索。
 - chroma delta 必须按预乘 alpha 的整层 RGBA 合成验证，不能把 `delta` 当作简单的 chroma 加法；pilot 与 data 联合生成时 alpha 保持恒定。
+- **可见性只有亮度轴被陪色匹配掉，色度轴极差 = `delta`**：实测 delta=8 时 ΔB=−8/255、ΔLuma=0.35/255，2.67pt 棋盘格在纯色页上看得见。v5.2 观测余量是 v4 的两倍，默认 `delta` 取 4（模拟器六版式 `correctedBits=0`）；v4 保持历史默认 8，要更淡用 6。改默认 delta 必须重新实测并同步 README 中英 / 接入 skill，并重跑真机 + 最暗页面可见性验收，不许只改代码。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
 - **改解码逻辑要同步两处**：v4 的 `Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
   是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码、校验阶梯）。
