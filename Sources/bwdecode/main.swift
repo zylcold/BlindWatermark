@@ -44,8 +44,14 @@ func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
         return false
     }
     let hex = payload.bytes.map { String(format: "%02x", $0) }.joined()
+    // 证据分档与 v4 同一把尺：v5.2 只有 CRC24（不是验签），观测不够就必须自己当守门人。
+    let minimum = BlockCodec.minObservationsPerBit
+    let verdict = result.hasSufficientEvidence
+        ? String(format: "OK(每 bit 最少 %d 次观测)", result.minObservations)
+        : String(format: "TOO_SMALL(每 bit 仅 %.1f 次观测、最少 %d 次，需要 ≥ %d：图太小或图案已被破坏)",
+                 result.averageObservations, result.minObservations, minimum)
     print(String(
-        format: "protocol=v5.2 payload=0x%@  plane=%@  pilot=%@  phase=(%d,%d)  scale=%.4f  correctedBits=%d  softRecovery=%@  pilotScore=%.3f  candidateCount=%d",
+        format: "protocol=v5.2 payload=0x%@  plane=%@  pilot=%@  phase=(%d,%d)  scale=%.4f  correctedBits=%d  softRecovery=%@  pilotScore=%.3f  candidateCount=%d  minObs=%d  avgObs=%.1f  |z|中位=%.1f  %@",
         hex,
         result.plane.rawValue,
         result.sync.rawValue,
@@ -55,14 +61,31 @@ func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
         result.correctedBits,
         result.softRecoveryUsed ? "true" : "false",
         result.pilotScore,
-        result.candidateCount
+        result.candidateCount,
+        result.minObservations,
+        result.averageObservations,
+        result.medianAbsZ,
+        verdict
     ))
+    if !result.hasSufficientEvidence {
+        let message = String(
+            format: "每 bit 仅 %.1f 次观测（最少 %d 次，需要 ≥ %d）：图太小或图案已被破坏，载荷不可信",
+            result.averageObservations, result.minObservations, minimum
+        )
+        guard layout else {
+            warn(message + "，不要用 --layout 解读字段")
+            return true
+        }
+        fail("图像太小 / 图案已被破坏，不解读字段：可用观测"
+            + "每 bit 仅 \(String(format: "%.1f", result.averageObservations)) 次（最少 \(result.minObservations) 次，需要 ≥ \(minimum)）。"
+            + "请让用户发原图并保证范围足够大（256 bit 码字实测需要约 1280 个 pair，整宽 1179 时约 150px 高）", code: 1)
+    }
     guard layout else { return true }
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
     formatter.timeZone = TimeZone(identifier: "UTC")
     print(String(
-        format: "uid=%u(0x%08X)  time=%@  page=%@  buildTime=%@  app=%u  note=%@  profile=%u  crcStatus=OK",
+        format: "uid=%u(0x%08X)  time=%@  page=%@  buildTime=%@  app=%u  note=%@  profile=%u  crcStatus=OK(完整性自检,未验签)",
         payload.uid,
         payload.uid,
         formatter.string(from: Date(timeIntervalSince1970: TimeInterval(payload.timestamp))),
@@ -170,7 +193,7 @@ let arguments = CommandLine.arguments
 while index < arguments.count {
     let argument = arguments[index]
     switch argument {
-    case "--protocol", "--version":
+    case "--protocol":
         index += 1
         guard index < arguments.count else { fail("--protocol 需要 v4、v5.2 或 auto", code: 2) }
         let value = arguments[index].lowercased()
@@ -267,6 +290,11 @@ if protocolVersion == "v5.2" {
         fail("v5.2 的物理码字固定为 256 bit（信息字段 207 bit），不要传 v4 的 --bits", code: 2)
     }
     if key != nil { fail("v5.2 只有 CRC24，没有 v4 的 HMAC；请去掉 --key", code: 2) }
+    // pilot 要从亮度通道叠调制，luma 平面已经把亮度通道拿去放数据了。
+    if pilot != .none && plane == .luma {
+        warn("--pilot \(pilot.rawValue) 在 --plane luma 下不会写入导频（luma 平面把亮度通道全部用于数据），"
+            + "输出的 pilotScore 无意义；要测导频请用 --plane chroma")
+    }
 }
 
 if protocolVersion == "v5.2" && pages != nil {

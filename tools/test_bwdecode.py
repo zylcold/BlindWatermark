@@ -496,6 +496,45 @@ def test_v52() -> bwdecode.WatermarkPayloadV52:
     check(bwdecode.v52_decode(plain, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
                               scale=1.0, search_tile=True) is None,
           "v5.2 纯色负样本无 CRC-valid 候选")
+
+    # PN 序列是跨语言契约（tile 像素与 pilotScore 都靠它）。golden vector 两边同串。
+    pn_bits = "".join("1" if bwdecode._v52_pn_bit(i) else "0" for i in range(64))
+    check(pn_bits == "1011111010000010101000111101010111010011010110110000101100011000",
+          "v5.2 PN golden vector（前 64 bit）")
+
+    # 不同 payload 同时 CRC-valid → ambiguous，不按 score 挑一个（Swift 侧同一条规则有单测）
+    other = bwdecode.WatermarkPayloadV52(uid=0xDEADBEEF, timestamp_offset=7,
+                                         build_minute_offset=3, page_code="other",
+                                         app=1, note_code="x")
+
+    def candidate(value, score):
+        return bwdecode._V52Candidate(payload=value, codeword_bytes=value.bytes,
+                                      corrected_bits=0, soft_recovery_used=False,
+                                      plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                                      scale=1.0, offset_x=0, offset_y=0, pilot_score=0.0,
+                                      median_abs_z=5.0, min_observations=20,
+                                      average_observations=20.0, score=score)
+
+    single = bwdecode._v52_adjudicate([candidate(payload, 1.0)])
+    check(single is not None and single.is_success and single.payload == payload,
+          "v5.2 单一候选照常返回")
+    ambiguous = bwdecode._v52_adjudicate([candidate(payload, 1.0), candidate(other, 9.0)])
+    check(ambiguous is not None and ambiguous.ambiguous and ambiguous.payload is None
+          and ambiguous.candidate_count == 2
+          and ambiguous.failure_reason == "multiple distinct CRC-valid payloads",
+          "v5.2 两个不同 CRC-valid 候选 → ambiguous 且拒绝返回")
+
+    # 小图观测不足：能解出错值不对的载荷也必须标记出来，CLI 靠它拒绝解读字段
+    small = v52_shot(payload, offset=(0, 0), width=320, height=320)
+    tiny = bwdecode.v52_decode(small, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                               scale=1.0, offset_x=0, offset_y=0, search_tile=False)
+    check(tiny is not None and tiny.payload == payload and not tiny.has_sufficient_evidence,
+          f"v5.2 小图被标出观测不足（最少 {tiny.min_observations if tiny else -1} 次/bit）")
+    full_screen = v52_shot(payload, offset=(0, 0))
+    big = bwdecode.v52_decode(full_screen, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                              scale=1.0, offset_x=0, offset_y=0, search_tile=False)
+    check(big is not None and big.has_sufficient_evidence,
+          f"v5.2 常规尺寸观测够（最少 {big.min_observations if big else -1} 次/bit）")
     return payload
 
 
@@ -578,6 +617,9 @@ def test_swift_v52_cross_check(payload: bwdecode.WatermarkPayloadV52) -> None:
               "同一张 PNG：Python 与 Swift v5.2 字段行一致")
         check("crcStatus=OK" in swift_result.stdout and "correctedBits=0" in swift_result.stdout,
               "Swift v5.2 CLI 明确报告 CRC 与纠错诊断")
+        check("crcStatus=OK(完整性自检,未验签)" in swift_result.stdout
+              and not any("mac=" in line for line in swift_result.stdout.splitlines()),
+              "v5.2 不得把 CRC24 说成验签（两端措辞一致）")
 
         cropped_path = os.path.join(folder, "v52-cropped.png")
         Image.fromarray(image[13:, 9:], mode="RGBA").save(cropped_path)
@@ -587,6 +629,39 @@ def test_swift_v52_cross_check(payload: bwdecode.WatermarkPayloadV52) -> None:
         )
         check(first in swift_cropped.stdout.splitlines()[0],
               "Swift v5.2 CLI：未知 phase / tile rotation 裁剪图解回")
+
+        # 小图：两端都必须拒绝解读字段，而不是打一份看着正常的垃圾
+        small_path = os.path.join(folder, "v52-small.png")
+        Image.fromarray(v52_shot(payload, offset=(0, 0), width=320, height=320)).save(small_path)
+        for name, command in (("Swift", [SWIFT_CLI]), ("Python", [sys.executable, os.path.join(REPO, "tools", "bwdecode.py")])):
+            gated = subprocess.run(
+                command + [small_path, "--protocol", "v5.2", "--layout", "--scale", "1"],
+                capture_output=True, text=True,
+            )
+            check(gated.returncode != 0, f"{name} v5.2 CLI 小图拒绝解读（exit={gated.returncode}）")
+            check("TOO_SMALL" in gated.stdout and "minObs=" in gated.stdout,
+                  f"{name} v5.2 CLI 报 TOO_SMALL 并带观测数")
+            warned = subprocess.run(
+                command + [small_path, "--protocol", "v5.2", "--scale", "1"],
+                capture_output=True, text=True,
+            )
+            check(warned.returncode == 0 and "uid=" not in warned.stdout
+                  and "载荷不可信" in warned.stderr,
+                  f"{name} v5.2 CLI 小图不加 --layout 时只警告、不解读字段")
+
+        # pilot=pn：同一张 PNG 上两端的 pilotScore 必须逐位一致（PN 序列 + tile 像素都对账）
+        pn_path = os.path.join(folder, "v52-pn.png")
+        Image.fromarray(v52_shot(payload, offset=(3, 5), sync=bwdecode.V52_SYNC_PN)).save(pn_path)
+        scores = []
+        for command in ([sys.executable, os.path.join(REPO, "tools", "bwdecode.py")], [SWIFT_CLI]):
+            pn_result = subprocess.run(
+                command + [pn_path, "--protocol", "v5.2", "--pilot", "pn", "--scale", "1",
+                           "--offset", "3,5"],
+                capture_output=True, text=True, check=True,
+            )
+            scores.append(float(pn_result.stdout.split("pilotScore=")[1].split()[0]))
+        check(abs(scores[0] - scores[1]) < 1e-3 and scores[0] > 0.1,
+              f"pilot=pn：两端 pilotScore 一致（{scores[0]:.6f} / {scores[1]:.6f}）")
 
 
 def main() -> int:

@@ -1154,6 +1154,12 @@ class V52Decoded:
     def is_success(self) -> bool:
         return self.payload is not None and not self.ambiguous
 
+    @property
+    def has_sufficient_evidence(self) -> bool:
+        """v5.2 只有 CRC24（不是验签），所以没有「带校验值就放行」的例外：
+        观测低于 MIN_OBSERVATIONS_PER_BIT 的图会解出「看着正常的垃圾」。"""
+        return self.min_observations >= MIN_OBSERVATIONS_PER_BIT
+
 
 def _v52_pn_bit(index: int) -> bool:
     value = (int(index) * 0x9E3779B9 + 0x7F4A7C15) & 0xFFFFFFFF
@@ -1359,7 +1365,8 @@ def _v52_try_candidate(raw: bytes, folded: V52Folded, hard: bytes,
     payload = WatermarkPayloadV52.from_bytes(corrected.message_bytes)
     if payload is None:
         return None
-    corrected_bits = sum((a ^ b).bit_count() for a, b in zip(hard, corrected.codeword_bytes))
+    # bin(...).count("1") 而不是 int.bit_count()：后者要 Python ≥3.10，本仓库的 python3 下限没有写进 README。
+    corrected_bits = sum(bin(a ^ b).count("1") for a, b in zip(hard, corrected.codeword_bytes))
     return _V52Candidate(
         payload=payload,
         codeword_bytes=corrected.codeword_bytes,
@@ -1604,7 +1611,7 @@ def parse_args(argv: list[str]) -> dict:
     index = 0
     while index < len(argv):
         argument = argv[index]
-        if argument in ("--protocol", "--version"):
+        if argument == "--protocol":
             index += 1
             if index >= len(argv):
                 fail("--protocol 需要 v4、v5.2 或 auto", 2)
@@ -1825,13 +1832,30 @@ def print_v52_result(result: V52Decoded, layout: bool) -> bool:
              f"（{result.failure_reason or '图像太小、相位或缩放不匹配'}）")
         return False
     payload = result.payload
+    # 证据分档与 v4 同一把尺：v5.2 只有 CRC24（不是验签），观测不够就必须自己当守门人。
+    minimum = MIN_OBSERVATIONS_PER_BIT
+    verdict = (f"OK(每 bit 最少 {result.min_observations} 次观测)" if result.has_sufficient_evidence
+               else f"TOO_SMALL(每 bit 仅 {result.average_observations:.1f} 次观测、"
+                    f"最少 {result.min_observations} 次，需要 ≥ {minimum}：图太小或图案已被破坏)")
     print(
         f"protocol=v5.2 payload=0x{payload.bytes.hex()}  plane={result.plane}  "
         f"pilot={result.sync}  phase=({result.offset_x},{result.offset_y})  "
         f"scale={result.estimated_scale:.4f}  correctedBits={result.corrected_bits}  "
         f"softRecovery={'true' if result.soft_recovery_used else 'false'}  "
-        f"pilotScore={result.pilot_score:.3f}  candidateCount={result.candidate_count}"
+        f"pilotScore={result.pilot_score:.3f}  candidateCount={result.candidate_count}  "
+        f"minObs={result.min_observations}  avgObs={result.average_observations:.1f}  "
+        f"|z|中位={result.median_abs_z:.1f}  {verdict}"
     )
+    if not result.has_sufficient_evidence:
+        message = (f"每 bit 仅 {result.average_observations:.1f} 次观测（最少 {result.min_observations} 次，"
+                   f"需要 ≥ {minimum}）：图太小或图案已被破坏，载荷不可信")
+        if not layout:
+            warn(message + "，不要用 --layout 解读字段")
+            return True
+        fail("图像太小 / 图案已被破坏，不解读字段：可用观测"
+             f"每 bit 仅 {result.average_observations:.1f} 次（最少 {result.min_observations} 次，"
+             f"需要 ≥ {minimum}）。请让用户发原图并保证范围足够大"
+             "（256 bit 码字实测需要约 1280 个 pair，整宽 1179 时约 150px 高）", 1)
     if not layout:
         return True
     stamp = datetime.datetime.fromtimestamp(payload.timestamp, datetime.timezone.utc)
@@ -1840,7 +1864,7 @@ def print_v52_result(result: V52Decoded, layout: bool) -> bool:
     print(
         f"uid={payload.uid}(0x{payload.uid:08X})  time={stamp.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
         f"page={payload.page_name_code}  buildTime={build.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
-        f"app={payload.app}  note={note}  profile={V52_PROFILE}  crcStatus=OK"
+        f"app={payload.app}  note={note}  profile={V52_PROFILE}  crcStatus=OK(完整性自检,未验签)"
     )
     return True
 
@@ -1865,6 +1889,10 @@ def main(argv: list[str]) -> int:
             fail("v5.2 只有 CRC24，没有 v4 的 HMAC；请去掉 --key", 2)
         if options["pages"] is not None:
             fail("--pages 是 v4 的 15 字符注册表；v5.2 只输出 8 字符 compact page code，请去掉 --pages", 2)
+        # pilot 要从亮度通道叠调制，luma 平面已经把亮度通道拿去放数据了。
+        if options["pilot"] != V52_SYNC_NONE and options["plane"] == "luma":
+            warn(f"--pilot {options['pilot']} 在 --plane luma 下不会写入导频"
+                 "（luma 平面把亮度通道全部用于数据），输出的 pilotScore 无意义；要测导频请用 --plane chroma")
     elif options["protocol"] == "auto":
         if options["key"] is not None:
             warn("--protocol auto 带 --key 时，v5.2 分支仍只验证 CRC24（不使用 HMAC）；若需强制验签请显式 --protocol v4")

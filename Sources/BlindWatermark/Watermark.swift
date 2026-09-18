@@ -162,7 +162,9 @@ final class WatermarkState {
     ) {
         config = Config(
             payload: payload.bytes,
-            payloadBits: V52BCH.codewordBits,
+            // v5.2 分支不读 payloadBits（走 v52Payload 生成 tile），这里存消息位数而不是物理码字长度，
+            // 免得后来者把一个 26 字节的 payload 当成 32 字节码字。
+            payloadBits: payload.bytes.count * 8,
             delta: delta,
             plane: plane,
             v52Payload: payload,

@@ -50,6 +50,12 @@ public enum V52Codec {
         public let averageObservations: Double
 
         public var isSuccess: Bool { payload != nil && !ambiguous }
+
+        /// v5.2 没有 HMAC 那一档，CRC24 只是完整性自检，所以证据门槛不设「有校验值就放行」的例外：
+        /// 每 bit 观测低于 `BlockCodec.minObservationsPerBit` 的图会解出「看着正常的垃圾」。
+        public var hasSufficientEvidence: Bool {
+            minObservations >= BlockCodec.minObservationsPerBit
+        }
     }
 
     // MARK: - Encoding
@@ -329,7 +335,9 @@ public enum V52Codec {
 
     // MARK: - Candidate scoring
 
-    private struct Candidate {
+    /// internal 而非 private：测试需要直接造候选，才能验证「不同 payload 同时 CRC-valid → ambiguous」
+    /// 这条裁决规则（合成图上很难自然地凑出两个合法候选）。
+    struct Candidate {
         let payload: WatermarkPayloadV52
         let codewordBytes: [UInt8]
         let correctedBits: Int
@@ -435,13 +443,13 @@ public enum V52Codec {
         )
     }
 
-    private static func adjudicate(
+    static func adjudicate(
         _ candidates: [Candidate],
-        plane: WatermarkPlane?,
-        sync: V52SyncMode?,
-        scale: Double?,
-        offsetX: Int?,
-        offsetY: Int?
+        plane: WatermarkPlane? = nil,
+        sync: V52SyncMode? = nil,
+        scale: Double? = nil,
+        offsetX: Int? = nil,
+        offsetY: Int? = nil
     ) -> Decoded? {
         guard !candidates.isEmpty else { return nil }
         var byPayload = [String: Candidate]()
@@ -544,6 +552,9 @@ public enum V52Codec {
         lumaIntegral: Integral?
     ) -> PairStats? {
         let block = Double(blockSize) * scale
+        // 负相位不接受：积分图会把越界的矩形夹到边界，多出一批被 clamp 的垃圾观测，
+        // 与 Python 端（`_v52_accumulate` 直接返回 None）分叉。相位由 decoder 自己搜索，调用方不需要负数。
+        guard offsetX >= 0, offsetY >= 0 else { return nil }
         guard block > 0, Double(image.width - offsetX) >= block * 2, Double(image.height - offsetY) >= block else {
             return nil
         }
@@ -666,7 +677,8 @@ public enum V52Codec {
         return output
     }
 
-    private static func pnBit(_ index: Int) -> Bool {
+    /// internal：与 `tools/bwdecode.py` 的 `_v52_pn_bit` 必须逐 bit 一致，两边都用 golden vector 钉住。
+    static func pnBit(_ index: Int) -> Bool {
         var x = UInt32(truncatingIfNeeded: index &* 0x9E37_79B9 &+ 0x7F4A_7C15)
         x ^= x >> 16
         x &*= 0x85EB_CA6B
@@ -677,7 +689,6 @@ public enum V52Codec {
     private static func bit(_ bytes: [UInt8], at index: Int) -> Bool {
         bytes[index >> 3] & (1 << UInt8(index & 7)) != 0
     }
-
     private static func pack(_ bits: [Bool]) -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: (bits.count + 7) / 8)
         for (index, value) in bits.enumerated() where value {

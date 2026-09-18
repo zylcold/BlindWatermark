@@ -178,4 +178,81 @@ final class V52Tests: XCTestCase {
         ))
         XCTAssertEqual(cropDecoded.payload, payload)
     }
+
+    /// 小图能解出自洽的 CRC-valid 载荷，但观测不足时必须被标出来 —— CLI 靠这个标记拒绝解读字段。
+    func testV52SmallImageIsMarkedInsufficient() throws {
+        var image = RGBAImage(width: 320, height: 320)
+        image.fill((200, 200, 200, 255))
+        image.blendTiled(V52Codec.makeTile(payload: payload, alpha: 8, plane: .chroma), dx: 0, dy: 0)
+        let decoded = try XCTUnwrap(V52Codec.decode(
+            image, plane: .chroma, sync: .none, scale: 1, offsetX: 0, offsetY: 0, searchTile: true
+        ))
+        XCTAssertEqual(decoded.payload, payload)
+        XCTAssertLessThan(decoded.minObservations, BlockCodec.minObservationsPerBit)
+        XCTAssertFalse(decoded.hasSufficientEvidence)
+
+        var fullScreen = RGBAImage(width: 1179, height: 2556)
+        fullScreen.fill((200, 200, 200, 255))
+        fullScreen.blendTiled(V52Codec.makeTile(payload: payload, alpha: 8, plane: .chroma), dx: 0, dy: 0)
+        let full = try XCTUnwrap(V52Codec.decode(
+            fullScreen, plane: .chroma, sync: .none, scale: 1, offsetX: 0, offsetY: 0, searchTile: false
+        ))
+        XCTAssertTrue(full.hasSufficientEvidence, "整屏最少 \(full.minObservations) 次/bit")
+    }
+
+    /// 两个不同的 CRC-valid 载荷同时出现 → 一律 ambiguous，不按 score 挑第一个。
+    func testV52AdjudicateRefusesTwoDistinctPayloads() throws {
+        let other = try XCTUnwrap(WatermarkPayloadV52(
+            uid: 0xDEAD_BEEF, timestampOffset: 7, buildMinuteOffset: 3,
+            pageCode: "other", app: 1, noteCode: "x"
+        ))
+        func candidate(_ payload: WatermarkPayloadV52, score: Double) -> V52Codec.Candidate {
+            V52Codec.Candidate(
+                payload: payload,
+                codewordBytes: V52BCH.encode(messageBytes: payload.bytes),
+                correctedBits: 0,
+                softRecoveryUsed: false,
+                plane: .chroma,
+                sync: .none,
+                scale: 1,
+                offsetX: 0,
+                offsetY: 0,
+                pilotScore: 0,
+                medianAbsZ: 5,
+                minObservations: 20,
+                averageObservations: 20,
+                score: score
+            )
+        }
+
+        let single = try XCTUnwrap(V52Codec.adjudicate([candidate(payload, score: 1)]))
+        XCTAssertEqual(single.payload, payload)
+        XCTAssertFalse(single.ambiguous)
+
+        let ambiguous = try XCTUnwrap(V52Codec.adjudicate([
+            candidate(payload, score: 1), candidate(other, score: 9),
+        ]))
+        XCTAssertTrue(ambiguous.ambiguous)
+        XCTAssertNil(ambiguous.payload)
+        XCTAssertFalse(ambiguous.isSuccess)
+        XCTAssertEqual(ambiguous.candidateCount, 2)
+        XCTAssertEqual(ambiguous.failureReason, "multiple distinct CRC-valid payloads")
+    }
+
+    /// PN 序列跨语言契约：`tools/bwdecode.py` 的 `_v52_pn_bit` 用同一串 golden vector 钉住。
+    func testV52PNSequenceGoldenVector() {
+        let expected = "1011111010000010101000111101010111010011010110110000101100011000"
+        XCTAssertEqual((0..<64).map { V52Codec.pnBit($0) ? "1" : "0" }.joined(), expected)
+    }
+
+    /// 负相位必须拒绝：积分图会把越界矩形夹到边界，多出垃圾观测（与 Python 端一致）。
+    func testV52NegativeOffsetIsRejected() {
+        var image = RGBAImage(width: 640, height: 900)
+        image.fill((200, 200, 200, 255))
+        image.blendTiled(V52Codec.makeTile(payload: payload, alpha: 8, plane: .chroma), dx: 3, dy: 5)
+        XCTAssertNil(V52Codec.decode(image, plane: .chroma, sync: .none, scale: 1,
+                                     offsetX: 3, offsetY: -1, searchTile: false))
+        XCTAssertNil(V52Codec.decode(image, plane: .chroma, sync: .none, scale: 1,
+                                     offsetX: -1, offsetY: 5, searchTile: false))
+    }
 }
