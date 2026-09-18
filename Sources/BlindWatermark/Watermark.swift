@@ -68,9 +68,14 @@ public enum Watermark {
 
     /// Explicit opt-in v5.2 path. The default `install(payload:)` remains the
     /// historical v4 renderer so existing integrations keep their protocol.
+    ///
+    /// `delta` 默认 4 而不是 v4 的 8：v5.2 每 bit 有两份反极性副本，观测余量是 v4 的两倍，
+    /// 真机模拟器实测六版式在 delta=4（甚至 2）下 `correctedBits=0`、`candidateCount=1`。
+    /// 可见性是色度轴幅度 = `delta`（亮度轴已被陪色匹配到 ~0.4/255），所以这个默认值直接
+    /// 减半了肉眼能看到的色差。改它之前先按 `skills/blind-watermark-integration` 重跑可见性验收。
     public static func installV52(
         payload: WatermarkPayloadV52,
-        delta: UInt8 = 8,
+        delta: UInt8 = 4,
         plane: WatermarkPlane = .chroma,
         sync: V52SyncMode = .none,
         windowLevel: UIWindow.Level = Watermark.defaultWindowLevel

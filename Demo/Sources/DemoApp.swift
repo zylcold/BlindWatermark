@@ -37,9 +37,10 @@ enum DemoWatermark {
         let delta = env["BW_DELTA"].flatMap({ UInt8($0) })
         if usesV52 {
             guard let compact = compactPayload(page: page) else { fatalError("v5.2 payload 不合法") }
+            // v5.2 默认 delta=4（可见色差减半），v4 保持历史默认 8；两者都以 BW_DELTA 覆盖。
             Watermark.installV52(
                 payload: compact,
-                delta: delta ?? 8,
+                delta: delta ?? 4,
                 plane: plane,
                 sync: env["BW_SYNC"].flatMap(V52SyncMode.init(rawValue:)) ?? .none
             )
