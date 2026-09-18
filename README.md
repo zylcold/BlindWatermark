@@ -202,6 +202,14 @@ swift build -c release
 `--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 512 / chroma），只穷举
 **块网格相位（mod 8）**与 512 tile 平移两个自由度，同样走上面那个三档校验阶梯。
 它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。
+
+**黑边会自动裁掉**：IM 转发 / 图片查看器 / CleanShot 会在截图外面套一层纯黑（有时带圆角）。
+黑边本身不产生观测，但黑边与内容交界的那几列 pair 会拿到量级很大、方向固定的假差分，按 tile 周期
+反复砸在同一批 bit 上，超过 BCH t=6 的纠错预算，整张图解不出 —— 实测一张企业微信转发的 v5.2 截图，
+不裁失败，裁完 `correctedBits=0`。所以自动路径（`--auto` / `--auto-offset` / 默认相位）会先裁掉
+四边的纯黑边框，输出行末尾加 `trim=(左,上,右,下)`，**`phase` 相对裁剪后的图像**。显式给 `--offset`
+的调用方自己掌握几何，不裁。深色页面的黑背景不会被误裁：单边黑条一旦顶到 25% 上限就整体放弃，
+而且黑边内侧必须紧接着明显更亮的内容（实测阈值见 `RGBAImage.BorderTrimHeuristic`）。
 载荷没带校验值（`mac` 全 0）而调用方又没给 `--key` 时，它没有可靠的裁决器 —— 会打警告并退结构自检，
 **不保证解出正确载荷**，判读必须看 `弱bit`。
 
@@ -529,3 +537,136 @@ v4 对照（同页、同 delta 8 实测同样是 ΔB=−8/255，两套协议配�
 v5.2 的一半，六版式在 delta=6 时仍全部 `mac=OK(验签)`，delta=4 时 dark/mixed 弱 bit 涨到 19/512。
 所以 **v5.2 默认 4**，**v4 保持历史默认 8**（要更不显眼用 6，先在真机复测再定）。改 delta 后都要
 按接入 skill 走一遍真机 + 最暗页面的可见性验收。
+
+
+## 实测与边界
+
+### 单元测试
+
+`swift test` 覆盖 62 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
+tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
+layout v4 回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
+block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
+PageRegistry / PageNameCodec。
+
+`python3 tools/test_bwdecode.py` 另有 124 项检查，并在同一张 PNG 上与 Swift 版对账。
+
+### 模拟器逐页实测
+
+`Demo/` 六个差异很大的版式，iPhone 16 模拟器（iOS 18.6，1179×2556），
+payload 是 layout v4（512 bit：uid `0xDEADBEEF` + 时间 + build `202609161722` + 15 字符短码 + note），
+chroma + delta 8（默认），无密钥（校验值是公开自检值）：
+
+| 页面 | 内容特征 | signal | \|z\|中位 | 最弱 | 弱 bit | 判定 | 校验 |
+|---|---|---|---|---|---|---|---|
+| plain | 近乎纯色渐变 | 9.00 | 120.3 | 4.1 | 0/512 | OK | 自检通过 |
+| white | 纯白 + 少量气泡文字 | 9.00 | 113.8 | 4.7 | 0/512 | OK | 自检通过 |
+| text | 文字密集列表 | 9.00 | 120.6 | 2.9 | 1/512 | WEAK | 自检通过 |
+| photo | 照片网格（合成噪声 + 硬边缘） | 9.10 | 35.0 | 6.6 | 0/512 | OK | 自检通过 |
+| dark | 深色底 + 深色卡片 | 9.12 | 113.8 | 1.9 | 4/512 | WEAK | 自检通过 |
+| mixed | 上白下黑 + 文字 + 照片 | 9.21 | 54.9 | 2.1 | 4/512 | WEAK | 自检通过 |
+
+对比 256 bit 布局（同一批版式）：`|z|` 中位 161.0 → 120.3、最弱 6.7 → 2.9，
+**余量大致减半**（payloadBits 翻倍 = 每 bit 观测减半）。上表几个 WEAK 只是弱 bit 不为 0，
+离 512/8 = 64 的阈值还很远，且 `mac=OK(自检,未验签)` 已经确认解对了 ——
+**512 bit 下判读以校验值为准，弱 bit 只作余量参考**。
+
+最苛刻的真实内容（springboard 照片壁纸 + 图标，离线合成、真机像素）：
+
+| delta | 每 bit 观测 | 解对 | \|z\|中位 | 弱 bit |
+|---|---|---|---|---|
+| 8（默认） | 45.5 | OK | 9.4 | 32/512 |
+| 10 | 45.5 | OK | 14.9 | 22/512 |
+| 12 | 45.5 | OK | 19.3 | 9/512 |
+
+**luma 在 512 bit 下不可用**（delta 12 实测：plain 弱 bit 10/512 WEAK，text 139/512 NO、photo 103/512 NO；
+delta 更小时更差）。luma 只能配更小的载荷，且要先跑 `Demo/sweep.sh` 复测。
+
+> `signal` 大 = 内容噪声大，与能否解出无关（text 页 luma 能拿 20，却是最差的）。
+> 决定成败的是 `|z|` 与校验值。
+
+换个版式做接入验收时，先跑 `Demo/sweep.sh` 复测，别照抄这里的数字：
+
+```bash
+cd Demo && ./sweep.sh                          # 默认 chroma 逐页扫
+cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 找余量
+cd Demo && ./sweep.sh "" "" chroma v52         # v5.2 协议逐页扫（BW_PROTOCOL=v52 + --protocol v5.2 --auto）
+```
+
+### 已知边界
+
+- **黑边自动裁**：IM 转发 / 图片查看器给截图套的纯黑边框先被裁掉再解码，输出行末尾给 `trim=(左,上,右,下)`，
+  `phase` 相对裁剪后的图。黑边不裁会让交界列产生固定方向的假差分、按 tile 周期反复砸同一批 bit，
+  超过 BCH t=6 的预算后整张图解不出（实测企业微信转发的 v5.2 图：不裁失败，裁完 `correctedBits=0`）。
+  显式 `--offset` 时不裁；深色页留白（单边黑条顶到 25% 上限）也不会被误裁。
+
+- **图太小就解不出，解码器会直接拒答**：每 bit 需要的观测次数 = 可用 pair 数 / payloadBits。
+  实测（真机像素、chroma、512 bit、整宽 1179）：每 bit 4.4 次观测时弱 bit 16/512、自检不过；
+  5.3 次时 0/512、通过 —— 所以下限取 **5 次/bit**，折合约 **2700 个 pair**
+  （整宽约 300px 高，或整屏 1179×2556）。低于这条线时解码器输出 `TOO_SMALL(...)`
+  并且**拒绝用 --layout 解读字段**（退化成"输出看着正常的垃圾"是不允许的）——
+  实测 482×440 的小裁剪只有 1.5~3.2 次/bit，必然拒答。
+- **v5.2 同一把尺，而且没有例外**：256 bit 码字（每 byte 在 tile 内有两份反极性副本，观测按码字 bit
+  折叠）实测 320×320 只有 **2 次/bit**、1179×2556 是 **平均 91 次 / 最少 76 次**/bit；下限同样取
+  **5 次/bit**，折合约 **1280 个 pair**（整宽 1179 约 150px 高）。CRC24 只是完整性自检、不是验签，
+  所以 v5.2 **没有** v4 那种「载荷带校验值就不限观测数」的例外：低于门槛一律输出 `TOO_SMALL(...)`
+  并拒绝 `--layout` 解读字段（两端 CLI 同样 exit 1）。
+- **layout v3（256 bit / 32 字节）已废弃**：字段边界变了，历史 v3 截图用本版本解不出来 ——
+  这是显式的破坏性变更。需要继续读老图的话，请用 1.0.0 tag 的解码器。
+
+- **chroma 的对抗样本**：色度结构恰好落在 8px 尺度时会退化。
+  `testChromaNeverSilentlyWrongOnAdversarialColorTexture` 兜住底线 —— 这种情况必须解不出或置信度低，
+  不允许静默给出错误的 payload。
+- **v4 缩放解不出**：v4 截图被缩放（聊天软件转发压缩、任何 resize）→ 块边长与平铺周期一起变了，完全解不出。
+  需要读缩放图时改用 v5.2，并显式传 `--scale` 或 `--protocol v5.2 --auto`；两者都不覆盖聊天软件二次压缩的未知处理。
+- **拍屏解不出**：另一台手机拍屏幕，摩尔纹与几何畸变会让块网格完全歪掉，
+  需要同步模板 + 深度学习那一路方案，本仓库不做。
+- **裁剪可以解**：`--auto` 覆盖纵向与横向裁剪（含非整 pair 偏移与奇数块偏移）；
+  裁决靠校验值 —— 有服务端 HMAC 就给 `--key`，没有就靠载荷自带的公开自检值。两者都没有（`mac` 全 0）
+  时只能退结构自检：实测 4 页面 × 5 裁剪 20 个用例里会错 1 个，而且错的那个长得像真解。
+
+## 模拟器冒烟
+
+```bash
+cd Demo && xcodegen generate
+xcodebuild -project Demo.xcodeproj -scheme Demo \
+  -destination 'id=<模拟器UDID>' -derivedDataPath /tmp/bwdd build
+xcrun simctl install booted /tmp/bwdd/Build/Products/Debug-iphonesimulator/Demo.app
+xcrun simctl launch booted com.zylcold.blindwatermark.demo
+xcrun simctl io booted screenshot /tmp/shot.png
+.build/release/bwdecode /tmp/shot.png
+```
+
+调参用环境变量（需要 `xcrun simctl launch` 前缀 `SIMCTL_CHILD_`）：
+`SIMCTL_CHILD_BW_PAYLOAD=0x1234 SIMCTL_CHILD_BW_DELTA=8 SIMCTL_CHILD_BW_PLANE=chroma`。
+
+## CI
+
+`.github/workflows/ci.yml` 对每个 PR 跑四件事：
+
+1. `swift build`（全 target 编译）
+2. `swift test`（62 例核心测试）
+3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
+   编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
+   编不到那部分。
+4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码 / 黑边，124 项）
+   并与 Swift 版 `bwdecode` 在同一张 PNG 上对账。
+
+本地复现：
+
+```bash
+swift build && swift test
+python3 tools/test_bwdecode.py
+cd Demo && xcodegen generate && xcodebuild -project Demo.xcodeproj -scheme Demo \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/bwdd CODE_SIGNING_ALLOWED=NO build
+```
+
+## 合规
+
+水印携带设备与时间信息，属个人信息处理。必须在隐私政策里明确告知用途与范围，
+不得用于告知目的之外的追踪。技术上能做 ≠ 合规能做。
+
+## License
+
+MIT

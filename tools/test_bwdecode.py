@@ -538,6 +538,50 @@ def test_v52() -> bwdecode.WatermarkPayloadV52:
     return payload
 
 
+def test_border_trim() -> None:
+    """黑边（IM 转发 / 图片查看器套的纯黑边框）必须自动裁掉，深色页留白必须不动。"""
+    print("黑边自动裁剪")
+    payload = bwdecode.WatermarkPayloadV52.build(uid=0x12345678, timestamp=1767250000,
+                                                 build_time=1767250000,
+                                                 page_class_name="ProfileViewController", note="hotfix")
+    shot = v52_shot(payload, offset=(3, 5), width=640, height=900)
+    barred = np.zeros((shot.shape[0], shot.shape[1] + 23, 4), dtype=np.uint8)
+    barred[:, :, 3] = 255
+    barred[:, 9:9 + shot.shape[1]] = shot
+
+    trimmed, trim = bwdecode.trim_uniform_dark_border(barred)
+    check(trim == (9, 0, 14, 0), f"识别出黑边 trim={trim}")
+    check(trimmed.shape == shot.shape, f"裁到内容区 {trimmed.shape}")
+    check(bool((trimmed == shot).all()), "裁出来的就是内容区像素")
+
+    # 深色页留白：四边各超过 25% 纯黑 → 当作内容，一列都不裁
+    dark = np.zeros((900, 640, 4), dtype=np.uint8)
+    dark[:, :, 3] = 255
+    dark[250:650, 200:440] = 255
+    _, dark_trim = bwdecode.trim_uniform_dark_border(dark)
+    check(dark_trim == (0, 0, 0, 0), f"深色留白不裁（{dark_trim}）")
+
+    if not os.path.exists(SWIFT_CLI):
+        print(f"  跳过 CLI 对账：没有 {SWIFT_CLI}（先 swift build -c release）")
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "barred.png")
+        Image.fromarray(barred, mode="RGBA").save(path)
+        expected = f"payload=0x{payload.bytes.hex()}"
+        outputs = []
+        for name, command in (("Swift", [SWIFT_CLI]),
+                              ("Python", [sys.executable, os.path.join(REPO, "tools", "bwdecode.py")])):
+            result = subprocess.run(
+                command + [path, "--protocol", "v5.2", "--auto-offset", "--scale", "1", "--layout"],
+                capture_output=True, text=True, check=True,
+            )
+            outputs.append(result.stdout)
+            check(expected in result.stdout.splitlines()[0], f"{name} CLI：裁掉黑边后解出同一份 payload")
+            check("trim=(9,0,14,0)" in result.stdout, f"{name} CLI：输出里带 trim=(9,0,14,0)")
+        check(outputs[0].splitlines()[1] == outputs[1].splitlines()[1],
+              "带黑边的图：两端字段行一致")
+
+
 def test_swift_cross_check(payload: bytes) -> None:
     print("与 Swift bwdecode 对账")
     if not os.path.exists(SWIFT_CLI):
@@ -677,6 +721,7 @@ def main() -> int:
         test_insufficient_observations()
         test_page_codec()
         v52_payload = test_v52()
+        test_border_trim()
         test_swift_cross_check(payload)
         test_swift_v52_cross_check(v52_payload)
     except AssertionError as error:

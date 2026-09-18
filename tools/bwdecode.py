@@ -1707,6 +1707,69 @@ def parse_args(argv: list[str]) -> dict:
     return options
 
 
+# 黑边检测阈值：与 Swift `RGBAImage.BorderTrimHeuristic` 一一对应。
+# 实测企业微信/CleanShot 转发图会在截图外套一层纯黑，圆角让边缘列的近黑占比只有 0.93~0.95。
+BORDER_DARK_LUMA = 32.0
+BORDER_MIN_DARK_COVERAGE = 0.90
+BORDER_MAX_TRIM_FRACTION = 0.25
+BORDER_PROBE_LUMA = 96.0
+BORDER_MIN_PROBE_COVERAGE = 0.30
+BORDER_PROBE_DEPTH = 8
+
+
+def trim_uniform_dark_border(image: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """裁掉四边纯黑边框，返回 (裁剪后的图, (left, top, right, bottom))。
+
+    黑边本身不产生观测，但**黑边与内容交界的那几列 pair** 会拿到量级很大、方向固定的假差分，
+    按 tile 周期性反复砸在同样的 bit 上，折起来就是十几个固定的错 bit，超过 BCH(255,207,t=6)
+    的纠错能力。实测一张企业微信转发图：不裁失败，裁完 correctedBits=0。
+
+    保守起见只在"这条边纯黑 + 紧挨着它就有明显更亮的内容"时才裁；深色 UI 的黑背景、或者
+    跑满上限的长条，都当作内容不动（与 Swift 端 `trimmingUniformDarkBorder` 逐条同义）。
+    """
+    height, width = image.shape[:2]
+    if height == 0 or width == 0:
+        return image, (0, 0, 0, 0)
+    luma = feature_plane(image, "luma").reshape(height, width)
+    dark = luma <= BORDER_DARK_LUMA
+    bright = luma >= BORDER_PROBE_LUMA
+    column_dark, column_bright = dark.sum(axis=0), bright.sum(axis=0)
+    row_dark, row_bright = dark.sum(axis=1), bright.sum(axis=1)
+
+    def run(counts: np.ndarray, bright_counts: np.ndarray, span: int, from_start: bool) -> int:
+        extent = int(counts.size)
+        cap = min(extent, max(1, int(extent * BORDER_MAX_TRIM_FRACTION)))
+        minimum = span * BORDER_MIN_DARK_COVERAGE
+        count = 0
+        while count < cap:
+            index = count if from_start else extent - 1 - count
+            if counts[index] < minimum:
+                break
+            count += 1
+        # 全黑一直顶到上限 → 深色内容，不是黑边
+        if count == 0 or count >= cap:
+            return 0
+        probe = 0
+        pixels = 0
+        for step in range(BORDER_PROBE_DEPTH):
+            index = count + step if from_start else extent - 1 - count - step
+            if index < count or index >= extent - count:
+                continue
+            probe += int(bright_counts[index])
+            pixels += span
+        if pixels == 0 or probe / pixels < BORDER_MIN_PROBE_COVERAGE:
+            return 0
+        return count
+
+    left = run(column_dark, column_bright, height, True)
+    top = run(row_dark, row_bright, width, True)
+    right = run(column_dark, column_bright, height, False)
+    bottom = run(row_dark, row_bright, width, False)
+    if left == top == right == bottom == 0:
+        return image, (0, 0, 0, 0)
+    return image[top:height - bottom, left:width - right], (left, top, right, bottom)
+
+
 def load_image(path: str) -> np.ndarray:
     try:
         with Image.open(path) as handle:
@@ -1821,7 +1884,7 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
         print(build_clock_line(fields.build))
 
 
-def print_v52_result(result: V52Decoded, layout: bool) -> bool:
+def print_v52_result(result: V52Decoded, layout: bool, trim_field: str = "") -> bool:
     """Print a successful v5.2 result; return false for ambiguity/failure."""
     if result.ambiguous:
         warn("v5.2 找到多个不同的 CRC-valid payload，拒绝按首个结果裁决 "
@@ -1844,7 +1907,7 @@ def print_v52_result(result: V52Decoded, layout: bool) -> bool:
         f"softRecovery={'true' if result.soft_recovery_used else 'false'}  "
         f"pilotScore={result.pilot_score:.3f}  candidateCount={result.candidate_count}  "
         f"minObs={result.min_observations}  avgObs={result.average_observations:.1f}  "
-        f"|z|中位={result.median_abs_z:.1f}  {verdict}"
+        f"|z|中位={result.median_abs_z:.1f}  {verdict}{trim_field}"
     )
     if not result.has_sufficient_evidence:
         message = (f"每 bit 仅 {result.average_observations:.1f} 次观测（最少 {result.min_observations} 次，"
@@ -1917,6 +1980,17 @@ def main(argv: list[str]) -> int:
     image = load_image(options["path"])
     key = options["key"]
 
+    # 黑边（IM 转发 / 图片查看器套的纯黑边框）先在自动路径上裁掉；显式 --offset 的调用方
+    # 自己掌握几何，不动他们的图。裁剪后 phase 相对裁剪后的图像。
+    trim = (0, 0, 0, 0)
+    if not options["explicit_offset"]:
+        image, trim = trim_uniform_dark_border(image)
+        if any(trim):
+            warn("检测到黑边，已按内容区解码"
+                 f"（trim=({trim[0]},{trim[1]},{trim[2]},{trim[3]})，"
+                 "phase 相对裁剪后的图像 / black border trimmed")
+    trim_field = f"  trim=({trim[0]},{trim[1]},{trim[2]},{trim[3]})" if any(trim) else ""
+
     if options["protocol"] in ("v5.2", "auto"):
         explicit_v52 = options["protocol"] == "v5.2"
         scales = ([options["scale"]] if options["scale"] is not None
@@ -1935,7 +2009,7 @@ def main(argv: list[str]) -> int:
                 search_tile=(options["auto"] or options["auto_offset"]) if explicit_v52 else True,
             )
         if v52_result is not None:
-            if print_v52_result(v52_result, options["layout"]):
+            if print_v52_result(v52_result, options["layout"], trim_field):
                 return 0
             fail("v5.2 解码未形成唯一的 BCH + CRC-valid 结果", 1)
         if explicit_v52:
@@ -1980,7 +2054,7 @@ def main(argv: list[str]) -> int:
         f"payload=0x{result.payload_bytes.hex()}  payloadBits={result.payload_bits}  "
         f"平面={result.plane}  相位=({result.offset_x},{result.offset_y})  "
         f"signal={result.signal:.2f}  |z|中位={result.median_abs_z:.1f}  "
-        f"最弱={result.confidence:.1f}  弱bit={weak}/{total}  {verdict}"
+        f"最弱={result.confidence:.1f}  弱bit={weak}/{total}  {verdict}{trim_field}"
     )
     if options["layout"]:
         if insufficient:

@@ -34,7 +34,7 @@ func warn(_ message: String) {
     FileHandle.standardError.write(("警告: " + message + "\n").data(using: .utf8)!)
 }
 
-func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
+func printV52Result(_ result: V52Codec.Decoded, layout: Bool, trim: String? = nil) -> Bool {
     guard let payload = result.payload, !result.ambiguous else {
         if result.ambiguous {
             warn("v5.2 找到多个不同的 CRC-valid payload，拒绝按首个结果裁决（候选 \(result.candidateCount) 个）")
@@ -51,7 +51,7 @@ func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
         : String(format: "TOO_SMALL(每 bit 仅 %.1f 次观测、最少 %d 次，需要 ≥ %d：图太小或图案已被破坏)",
                  result.averageObservations, result.minObservations, minimum)
     print(String(
-        format: "protocol=v5.2 payload=0x%@  plane=%@  pilot=%@  phase=(%d,%d)  scale=%.4f  correctedBits=%d  softRecovery=%@  pilotScore=%.3f  candidateCount=%d  minObs=%d  avgObs=%.1f  |z|中位=%.1f  %@",
+        format: "protocol=v5.2 payload=0x%@  plane=%@  pilot=%@  phase=(%d,%d)  scale=%.4f  correctedBits=%d  softRecovery=%@  pilotScore=%.3f  candidateCount=%d  minObs=%d  avgObs=%.1f  |z|中位=%.1f  %@%@",
         hex,
         result.plane.rawValue,
         result.sync.rawValue,
@@ -65,7 +65,8 @@ func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
         result.minObservations,
         result.averageObservations,
         result.medianAbsZ,
-        verdict
+        verdict,
+        trimField.map { "  \($0)" } ?? ""
     ))
     if !result.hasSufficientEvidence {
         let message = String(
@@ -339,6 +340,18 @@ else {
     fail("读不到图片: \(path)", code: 1)
 }
 
+// 黑边（IM 转发 / 图片查看器套的纯黑边框）会在交界列上制造量级大、方向固定的假差分，
+// 按 tile 周期性反复砸同一批 bit，直接把 BCH 纠错预算用光。自动路径先裁掉它；
+// 显式给了 --offset 的调用方自己掌握几何，不动它们的图。
+let trimmed: (image: RGBAImage, trim: UniformBorderTrim) = explicitOffset
+    ? (image, .none)
+    : image.trimmingUniformDarkBorder()
+let workingImage = trimmed.image
+let trimField = trimmed.trim.outputField
+if let trimField {
+    warn("检测到黑边，已按内容区解码（\(trimField)，phase 相对裁剪后的图像 / black border trimmed")
+}
+
 // v5.2 is opt-in. In `auto` mode it gets one protocol-aware chance before the
 // historical v4 ladder; a CRC-valid v5.2 result wins and an ambiguous result is
 // refused instead of being reinterpreted as v4.
@@ -348,7 +361,7 @@ if protocolVersion == "v5.2" || protocolVersion == "auto" {
     let v52Result: V52Codec.Decoded?
     if explicitV52 && !auto && !autoOffset {
         v52Result = V52Codec.decode(
-            image,
+            workingImage,
             plane: plane,
             sync: pilot,
             scale: v52Scale ?? 1.0,
@@ -358,7 +371,7 @@ if protocolVersion == "v5.2" || protocolVersion == "auto" {
         )
     } else {
         v52Result = V52Codec.decodeBest(
-            image,
+            workingImage,
             scales: scales,
             planes: explicitV52 ? [plane] : [.chroma, .luma],
             syncModes: [pilot],
@@ -367,7 +380,7 @@ if protocolVersion == "v5.2" || protocolVersion == "auto" {
         )
     }
     if let v52Result {
-        if printV52Result(v52Result, layout: showLayout) { exit(0) }
+        if printV52Result(v52Result, layout: showLayout, trim: trimField) { exit(0) }
         fail("v5.2 解码未形成唯一的 BCH + CRC-valid 结果", code: 1)
     } else if explicitV52 {
         fail("v5.2 解码失败：未找到 BCH + CRC-valid 结果，请检查 --plane/--pilot/--scale/--offset", code: 1)
@@ -382,7 +395,7 @@ if auto {
     if payloadBits != WatermarkPayload.payloadBits {
         payloadBitsCandidates.append(payloadBits)
     }
-    (result, tier) = decodeLadder(image, payloadBitsCandidates: payloadBitsCandidates, planes: [.chroma, .luma], key: key)
+    (result, tier) = decodeLadder(workingImage, payloadBitsCandidates: payloadBitsCandidates, planes: [.chroma, .luma], key: key)
 } else {
     if autoOffset {
         // 相位与 tile 平移都不确定：块网格相位靠 medianAbsZ 排序，平移只能靠校验值裁决
@@ -391,10 +404,10 @@ if auto {
             warn("HMAC 与公开自检值都只覆盖 \(WatermarkPayload.payloadBits) bit 推荐布局，"
                 + "--bits \(payloadBits) 下相位与平移无法校验")
         }
-        (result, tier) = decodeLadder(image, payloadBitsCandidates: [payloadBits], planes: [plane], key: key)
+        (result, tier) = decodeLadder(workingImage, payloadBitsCandidates: [payloadBits], planes: [plane], key: key)
     } else {
         result = BlockCodec.decode(
-            image,
+            workingImage,
             payloadBits: payloadBits,
             offsetX: offsetX,
             offsetY: offsetY,
@@ -433,7 +446,7 @@ if insufficient {
 }
 
 print(String(
-    format: "payload=0x%@  payloadBits=%d  平面=%@  相位=(%d,%d)  signal=%.2f  |z|中位=%.1f  最弱=%.1f  弱bit=%d/%d  %@",
+    format: "payload=0x%@  payloadBits=%d  平面=%@  相位=(%d,%d)  signal=%.2f  |z|中位=%.1f  最弱=%.1f  弱bit=%d/%d  %@%@",
     hex,
     result.payloadBits,
     result.plane.rawValue,
@@ -444,7 +457,8 @@ print(String(
     result.confidence,
     weak,
     total,
-    verdict
+    verdict,
+    trimField.map { "  \($0)" } ?? ""
 ))
 
 // 推荐布局的字段解读
