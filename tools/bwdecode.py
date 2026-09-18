@@ -3,11 +3,12 @@
 
 与 `Sources/bwdecode/main.swift` 行为对齐：同样的参数、同样的输出格式、同样的判读规则，
 区别只在实现语言。用途是**跨语言备份**：macOS 上编不了 Swift 时也能解截图，
-以及拿两套实现对账（`tools/test_bwdecode.py` 就跑这个对账）。
+以及拿两套实现对账（`tools/test_bwdecode.py` 就跑这个对账）。v4 镜像 `BlockCodec`，v5.2 镜像
+`V52BCH` / `V52Codec`；修改任一协议时只改一端会破坏跨语言结果。
 
 依赖 numpy（特征平面与积分图）与 Pillow（读 PNG/JPEG）。系统的处理逻辑都在
-`Sources/BlindWatermarkCore/BlockCodec.swift`，这里是它的镜像 —— 改一处必须改两处，
-`tools/test_bwdecode.py` 会在两张图上做交叉验证。
+`Sources/BlindWatermarkCore/BlockCodec.swift` 与 `V52Codec.swift`，这里是它们的镜像 —— 改一处必须改两处，
+`tools/test_bwdecode.py` 会在同一批 PNG 上做交叉验证。
 
 用法见 `--help` 或 README 的「解码」一节。
 """
@@ -17,9 +18,11 @@ from __future__ import annotations
 import datetime
 import hashlib
 import hmac
+import itertools
 import json
 import math
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
@@ -64,6 +67,32 @@ KNOWN_PREFIXES = ["BH", "JY", "LL", "HW", "XQ"]
 CODE_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_"
 CODE_LENGTH = 15
 PAD_CHARACTER = "_"
+
+# v5.2 is deliberately kept beside (and independent from) the historical v4
+# decoder.  The physical codeword is always 256 bits: a systematic BCH(255,207)
+# code followed by one even-parity extension bit.  `V52_*` names avoid silently
+# reusing a v4 constant in either the protocol or the image path.
+V52_PAYLOAD_BITS = 207
+V52_PAYLOAD_BYTE_COUNT = 26
+V52_CODEWORD_BITS = 256
+V52_CODEWORD_BYTE_COUNT = 32
+V52_BCH_BITS = 255
+V52_MESSAGE_BITS = 207
+V52_PARITY_BITS = 48
+V52_BCH_CORRECTION_LIMIT = 6
+V52_PROFILE = 1
+V52_TIMESTAMP_EPOCH = 1_767_225_600  # 2026-01-01 00:00:00 UTC
+V52_PAGE_LENGTH = 8
+V52_NOTE_LENGTH = 6
+V52_PAGE_BITS = 42
+V52_NOTE_BITS = 32
+V52_CRC_BITS = 24
+V52_CRC_BODY_BITS = 179
+V52_BCH_GENERATOR = 0x1C7EB85DF3C97
+V52_ALPHABET = CODE_ALPHABET
+V52_DEFAULT_SCALES = tuple(0.50 + 0.05 * i for i in range(21))
+V52_DEFAULT_CHASE_BITS = 12
+V52_DEFAULT_CHASE_FLIPS = 2
 
 
 # MARK: - 特征平面与积分图
@@ -636,6 +665,914 @@ def registry_matches(names: list[str], code: str) -> list[str]:
     return [name for name in names if page_name_code(name) == code]
 
 
+# MARK: - v5.2 compact payload and BCH
+
+
+def _v52_bits(value: int, width: int) -> list[bool]:
+    """Return a fixed-width integer as a low-bit-first stream."""
+    return [bool((int(value) >> bit) & 1) for bit in range(width)]
+
+
+def _v52_read(bits: list[bool], offset: int, width: int) -> int:
+    value = 0
+    for bit in range(width):
+        if bits[offset + bit]:
+            value |= 1 << bit
+    return value
+
+
+def _v52_pack(bits: list[bool]) -> bytes:
+    output = bytearray((len(bits) + 7) // 8)
+    for index, value in enumerate(bits):
+        if value:
+            output[index >> 3] |= 1 << (index & 7)
+    return bytes(output)
+
+
+def _v52_unpack(data: bytes, count: int) -> list[bool]:
+    return [bool(data[index >> 3] & (1 << (index & 7))) for index in range(count)]
+
+
+def _v52_compact_code(value: str, max_length: int) -> str | None:
+    if max_length <= 0:
+        return None
+    chars = list(str(value).lower())
+    while chars and chars[-1] == PAD_CHARACTER:
+        chars.pop()
+    if len(chars) > max_length or any(char not in V52_ALPHABET for char in chars):
+        return None
+    return "".join(chars)
+
+
+def encode_base37(value: str, length: int) -> int | None:
+    """Encode a compact field as a fixed-width, most-significant digit first radix value."""
+    if not 1 <= length <= 8:
+        return None
+    compact = _v52_compact_code(value, length)
+    if compact is None:
+        return None
+    digits = compact + PAD_CHARACTER * (length - len(compact))
+    result = 0
+    for char in digits:
+        result = result * 37 + V52_ALPHABET.index(char)
+    return result
+
+
+def decode_base37(value: int, length: int) -> str | None:
+    """Decode a radix value and remove only the fixed-field right padding."""
+    if not 1 <= length <= 8:
+        return None
+    limit = 37 ** length
+    if not 0 <= int(value) < limit:
+        return None
+    remaining = int(value)
+    chars = [PAD_CHARACTER] * length
+    for index in range(length - 1, -1, -1):
+        chars[index] = V52_ALPHABET[remaining % 37]
+        remaining //= 37
+    while chars and chars[-1] == PAD_CHARACTER:
+        chars.pop()
+    return "".join(chars)
+
+
+def crc24_bits(bits: list[bool]) -> int:
+    """CRC-24/OPENPGP over the exact 179 protocol bits, without byte padding."""
+    crc = 0xB704CE
+    for bit in bits:
+        top = ((crc >> 23) & 1) ^ int(bool(bit))
+        crc = (crc << 1) & 0xFFFFFF
+        if top:
+            crc ^= 0x864CFB
+    return crc
+
+
+class WatermarkPayloadV52:
+    """The compact 207-bit v5.2 payload before BCH encoding."""
+
+    payload_bits = V52_PAYLOAD_BITS
+    byte_count = V52_PAYLOAD_BYTE_COUNT
+    profile = V52_PROFILE
+    timestamp_epoch = V52_TIMESTAMP_EPOCH
+    page_length = V52_PAGE_LENGTH
+    note_length = V52_NOTE_LENGTH
+    page_bits = V52_PAGE_BITS
+    note_bits = V52_NOTE_BITS
+
+    def __init__(self, uid: int, timestamp_offset: int, build_minute_offset: int,
+                 page_code: str, app: int = 0, note_code: str = "",
+                 crc24: int | None = None):
+        if not 0 <= int(uid) <= 0xFFFFFFFF:
+            raise ValueError("uid must fit UInt32")
+        if not 0 <= int(timestamp_offset) <= (1 << 31) - 1:
+            raise ValueError("timestamp offset must fit 31 bits")
+        if not 0 <= int(build_minute_offset) < (1 << 24):
+            raise ValueError("build minute offset must fit 24 bits")
+        if not 0 <= int(app) <= 9_999:
+            raise ValueError("app must be in 0...9999")
+        page = _v52_compact_code(page_code, V52_PAGE_LENGTH)
+        note = _v52_compact_code(note_code, V52_NOTE_LENGTH)
+        if page is None or note is None:
+            raise ValueError("page/note contains an invalid or oversized base-37 code")
+        self.uid = int(uid)
+        self.timestamp_offset = int(timestamp_offset)
+        self.build_minute_offset = int(build_minute_offset)
+        self.page_code = page
+        self.app = int(app)
+        self.note_code = note
+        body = self._body_bits()
+        self.crc24 = crc24_bits(body) if crc24 is None else int(crc24) & 0xFFFFFF
+
+    @classmethod
+    def build(cls, uid: int, timestamp: int, build_time: int,
+              page_class_name: str, app: int = 0, note: str = "") -> "WatermarkPayloadV52 | None":
+        """Build from Unix seconds, with build time rounded down to a UTC minute."""
+        if timestamp < V52_TIMESTAMP_EPOCH or build_time < V52_TIMESTAMP_EPOCH:
+            return None
+        timestamp_offset = int(timestamp) - V52_TIMESTAMP_EPOCH
+        build_minute_offset = (int(build_time) - V52_TIMESTAMP_EPOCH) // 60
+        if timestamp_offset > (1 << 31) - 1 or build_minute_offset >= (1 << 24):
+            return None
+        page = page_name_code(page_class_name)[:V52_PAGE_LENGTH]
+        compact_note = str(note).lower()
+        try:
+            return cls(uid, timestamp_offset, build_minute_offset, page, app, compact_note)
+        except ValueError:
+            return None
+
+    @classmethod
+    def from_relative(cls, uid: int, timestamp_offset: int, build_minute_offset: int,
+                      page_class_name: str, app: int = 0,
+                      note: str = "") -> "WatermarkPayloadV52 | None":
+        page = page_name_code(page_class_name)[:V52_PAGE_LENGTH]
+        try:
+            return cls(uid, timestamp_offset, build_minute_offset, page, app, str(note).lower())
+        except ValueError:
+            return None
+
+    @classmethod
+    def from_codes(cls, uid: int, timestamp_offset: int, build_minute_offset: int,
+                   page_code: str, app: int = 0,
+                   note_code: str = "") -> "WatermarkPayloadV52 | None":
+        try:
+            return cls(uid, timestamp_offset, build_minute_offset, page_code, app, note_code)
+        except ValueError:
+            return None
+
+    @classmethod
+    def from_bytes(cls, raw: bytes | bytearray) -> "WatermarkPayloadV52 | None":
+        data = bytes(raw)
+        if len(data) != V52_PAYLOAD_BYTE_COUNT or data[-1] & 0x80:
+            return None
+        bits = _v52_unpack(data, V52_PAYLOAD_BITS)
+        cursor = 0
+        profile = _v52_read(bits, cursor, 4); cursor += 4
+        if profile != V52_PROFILE:
+            return None
+        uid = _v52_read(bits, cursor, 32); cursor += 32
+        timestamp_offset = _v52_read(bits, cursor, 31); cursor += 31
+        build_minute_offset = _v52_read(bits, cursor, 24); cursor += 24
+        page_value = _v52_read(bits, cursor, V52_PAGE_BITS); cursor += V52_PAGE_BITS
+        app = _v52_read(bits, cursor, 14); cursor += 14
+        note_value = _v52_read(bits, cursor, V52_NOTE_BITS); cursor += V52_NOTE_BITS
+        crc = _v52_read(bits, cursor, V52_CRC_BITS); cursor += V52_CRC_BITS
+        if _v52_read(bits, cursor, 4) != 0:
+            return None
+        page = decode_base37(page_value, V52_PAGE_LENGTH)
+        note = decode_base37(note_value, V52_NOTE_LENGTH)
+        if page is None or note is None or app > 9_999:
+            return None
+        if crc24_bits(bits[:V52_CRC_BODY_BITS]) != crc:
+            return None
+        try:
+            return cls(uid, timestamp_offset, build_minute_offset, page, app, note, crc)
+        except ValueError:
+            return None
+
+    @classmethod
+    def encode_base37(cls, value: str, length: int) -> int | None:
+        return encode_base37(value, length)
+
+    @classmethod
+    def decode_base37(cls, value: int, length: int) -> str | None:
+        return decode_base37(value, length)
+
+    @classmethod
+    def crc24(cls, bits: list[bool]) -> int:
+        return crc24_bits(bits)
+
+    def _body_bits(self) -> list[bool]:
+        page = encode_base37(self.page_code, V52_PAGE_LENGTH)
+        note = encode_base37(self.note_code, V52_NOTE_LENGTH)
+        assert page is not None and note is not None
+        bits: list[bool] = []
+        bits.extend(_v52_bits(V52_PROFILE, 4))
+        bits.extend(_v52_bits(self.uid, 32))
+        bits.extend(_v52_bits(self.timestamp_offset, 31))
+        bits.extend(_v52_bits(self.build_minute_offset, 24))
+        bits.extend(_v52_bits(page, V52_PAGE_BITS))
+        bits.extend(_v52_bits(self.app, 14))
+        bits.extend(_v52_bits(note, V52_NOTE_BITS))
+        assert len(bits) == V52_CRC_BODY_BITS
+        return bits
+
+    @property
+    def bytes(self) -> bytes:
+        bits = self._body_bits()
+        bits.extend(_v52_bits(self.crc24, V52_CRC_BITS))
+        bits.extend([False] * 4)  # reserved
+        assert len(bits) == V52_PAYLOAD_BITS
+        return _v52_pack(bits)
+
+    @property
+    def timestamp(self) -> int:
+        return V52_TIMESTAMP_EPOCH + self.timestamp_offset
+
+    @property
+    def build_time(self) -> int:
+        return V52_TIMESTAMP_EPOCH + self.build_minute_offset * 60
+
+    @property
+    def page_name_code(self) -> str:
+        return self.page_code
+
+    @property
+    def note(self) -> str:
+        return self.note_code
+
+    @property
+    def is_valid(self) -> bool:
+        return crc24_bits(self._body_bits()) == self.crc24
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, WatermarkPayloadV52):
+            return NotImplemented
+        return self.__dict__ == other.__dict__
+
+    def __repr__(self) -> str:
+        return (f"WatermarkPayloadV52(uid={self.uid}, timestamp_offset={self.timestamp_offset}, "
+                f"build_minute_offset={self.build_minute_offset}, page_code={self.page_code!r}, "
+                f"app={self.app}, note_code={self.note_code!r}, crc24=0x{self.crc24:06x})")
+
+
+@dataclass(frozen=True)
+class V52BCHDecoded:
+    message_bytes: bytes
+    codeword_bytes: bytes
+    corrected_bits: int
+
+
+_V52_GF_EXP = [0] * 510
+_V52_GF_LOG = [-1] * 256
+_v52_gf_value = 1
+for _v52_index in range(255):
+    _V52_GF_EXP[_v52_index] = _v52_gf_value
+    _V52_GF_LOG[_v52_gf_value] = _v52_index
+    _v52_gf_value <<= 1
+    if _v52_gf_value & 0x100:
+        _v52_gf_value ^= 0x11D
+for _v52_index in range(255, 510):
+    _V52_GF_EXP[_v52_index] = _V52_GF_EXP[_v52_index - 255]
+
+
+def _v52_gf_exp(exponent: int) -> int:
+    return _V52_GF_EXP[exponent % 255]
+
+
+def _v52_gf_multiply(lhs: int, rhs: int) -> int:
+    if lhs == 0 or rhs == 0:
+        return 0
+    return _v52_gf_exp(_V52_GF_LOG[lhs] + _V52_GF_LOG[rhs])
+
+
+def _v52_gf_inverse(value: int) -> int:
+    if value == 0:
+        raise ZeroDivisionError("GF(256) inverse of zero")
+    return _v52_gf_exp(255 - _V52_GF_LOG[value])
+
+
+class V52BCH:
+    """Binary narrow-sense BCH(255,207), t=6, with an even parity extension."""
+
+    codeword_bits = V52_CODEWORD_BITS
+    bch_bits = V52_BCH_BITS
+    message_bits = V52_MESSAGE_BITS
+    parity_bits = V52_PARITY_BITS
+    correction_limit = V52_BCH_CORRECTION_LIMIT
+    message_byte_count = V52_PAYLOAD_BYTE_COUNT
+    codeword_byte_count = V52_CODEWORD_BYTE_COUNT
+
+    @staticmethod
+    def encode(message_bytes: bytes | bytearray) -> bytes:
+        message = bytes(message_bytes)
+        if len(message) != V52_PAYLOAD_BYTE_COUNT:
+            raise ValueError("v5.2 BCH message must be 26 bytes")
+        if message[-1] & 0x80:
+            raise ValueError("v5.2 message bit 207 must be zero padding")
+        work = [False] * V52_BCH_BITS
+        for index in range(V52_MESSAGE_BITS):
+            work[V52_PARITY_BITS + index] = bool(message[index >> 3] & (1 << (index & 7)))
+        for pivot in range(V52_BCH_BITS - 1, V52_PARITY_BITS - 1, -1):
+            if not work[pivot]:
+                continue
+            shift = pivot - V52_PARITY_BITS
+            for offset in range(V52_PARITY_BITS + 1):
+                if (V52_BCH_GENERATOR >> offset) & 1:
+                    work[shift + offset] = not work[shift + offset]
+        codeword = [False] * V52_CODEWORD_BITS
+        codeword[:V52_PARITY_BITS] = work[:V52_PARITY_BITS]
+        for index in range(V52_MESSAGE_BITS):
+            codeword[V52_PARITY_BITS + index] = bool(message[index >> 3] & (1 << (index & 7)))
+        codeword[255] = sum(codeword[:255]) % 2 == 1
+        return _v52_pack(codeword)
+
+    @classmethod
+    def _syndromes(cls, bits: list[bool]) -> list[int]:
+        values = []
+        for order in range(1, 2 * cls.correction_limit + 1):
+            value = 0
+            for degree, bit in enumerate(bits):
+                if bit:
+                    value ^= _v52_gf_exp(order * degree)
+            values.append(value)
+        return values
+
+    @classmethod
+    def _berlekamp_massey(cls, syndromes: list[int]) -> list[int] | None:
+        size = 2 * cls.correction_limit + 1
+        connection = [0] * size
+        backup = [0] * size
+        connection[0] = 1
+        backup[0] = 1
+        length = 0
+        shift = 1
+        scale = 1
+        for index in range(len(syndromes)):
+            discrepancy = syndromes[index]
+            if length > 0:
+                for coefficient in range(1, length + 1):
+                    discrepancy ^= _v52_gf_multiply(connection[coefficient], syndromes[index - coefficient])
+            if discrepancy == 0:
+                shift += 1
+                continue
+            previous = connection.copy()
+            factor = _v52_gf_multiply(discrepancy, _v52_gf_inverse(scale))
+            for coefficient in range(size - shift):
+                if backup[coefficient] != 0:
+                    connection[coefficient + shift] ^= _v52_gf_multiply(factor, backup[coefficient])
+            if 2 * length <= index:
+                length = index + 1 - length
+                backup = previous
+                scale = discrepancy
+                shift = 1
+            else:
+                shift += 1
+            if length > cls.correction_limit:
+                return None
+        return connection[:length + 1]
+
+    @classmethod
+    def decode(cls, codeword_bytes: bytes | bytearray) -> V52BCHDecoded | None:
+        data = bytes(codeword_bytes)
+        if len(data) != V52_CODEWORD_BYTE_COUNT:
+            return None
+        received = _v52_unpack(data, V52_CODEWORD_BITS)
+        bch_received = received[:V52_BCH_BITS]
+        syndrome_values = cls._syndromes(bch_received)
+        if all(value == 0 for value in syndrome_values):
+            corrected = bch_received
+            corrected_count = 0
+        else:
+            locator = cls._berlekamp_massey(syndrome_values)
+            if locator is None or len(locator) <= 1:
+                return None
+            degree = len(locator) - 1
+            if degree > cls.correction_limit:
+                return None
+            positions = []
+            for error_degree in range(V52_BCH_BITS):
+                x = 1 if error_degree == 0 else _v52_gf_exp(255 - error_degree)
+                value = 0
+                power = 1
+                for coefficient in locator:
+                    value ^= _v52_gf_multiply(coefficient, power)
+                    power = _v52_gf_multiply(power, x)
+                if value == 0:
+                    positions.append(error_degree)
+            if len(positions) != degree:
+                return None
+            corrected = bch_received.copy()
+            for position in positions:
+                corrected[position] = not corrected[position]
+            if any(cls._syndromes(corrected)):
+                return None
+            corrected_count = len(positions)
+        expected_parity = sum(corrected) % 2 == 1
+        if received[255] != expected_parity:
+            corrected_count += 1
+        full = corrected + [expected_parity]
+        message = _v52_pack(corrected[V52_PARITY_BITS:V52_BCH_BITS])
+        canonical = cls.encode(message)
+        corrected_bytes = _v52_pack(full)
+        if canonical != corrected_bytes:
+            return None
+        return V52BCHDecoded(message, corrected_bytes, corrected_count)
+
+
+# Short aliases are useful to callers that mirror the Swift type names without
+# making v4's `Payload` ambiguous.
+PayloadV52 = WatermarkPayloadV52
+
+
+# MARK: - v5.2 image layer (mirror of Sources/BlindWatermarkCore/V52Codec.swift)
+
+
+V52_SYNC_NONE = "none"
+V52_SYNC_PN = "pn"
+V52_SYNC_SEPARATED = "separated"
+V52_MIN_MAGNITUDE = 0.25
+_V52_PAIR_ROWS = np.arange(PAIRS_PER_TILE, dtype=np.int64) // PAIRS_PER_ROW
+_V52_PAIR_COLS = np.arange(PAIRS_PER_TILE, dtype=np.int64) % PAIRS_PER_ROW
+
+
+@dataclass
+class V52PairStats:
+    sums: np.ndarray
+    squares: np.ndarray
+    counts: np.ndarray
+    pilot_sums: np.ndarray
+    pilot_squares: np.ndarray
+    pilot_counts: np.ndarray
+    abs_sum: float
+    observed: int
+
+    @classmethod
+    def empty(cls) -> "V52PairStats":
+        zeros = np.zeros(PAIRS_PER_TILE, dtype=np.float64)
+        return cls(
+            sums=zeros.copy(),
+            squares=zeros.copy(),
+            counts=np.zeros(PAIRS_PER_TILE, dtype=np.int64),
+            pilot_sums=zeros.copy(),
+            pilot_squares=zeros.copy(),
+            pilot_counts=np.zeros(PAIRS_PER_TILE, dtype=np.int64),
+            abs_sum=0.0,
+            observed=0,
+        )
+
+
+@dataclass
+class V52Folded:
+    scores: np.ndarray
+    counts: np.ndarray
+    signal: float
+    pilot_score: float
+    median_abs_z: float
+    min_observations: int
+    average_observations: float
+
+
+@dataclass
+class V52Decoded:
+    payload: WatermarkPayloadV52 | None
+    codeword_bytes: bytes | None
+    plane: str
+    sync: str
+    offset_x: int
+    offset_y: int
+    estimated_scale: float
+    corrected_bits: int
+    soft_recovery_used: bool
+    pilot_score: float
+    candidate_count: int
+    ambiguous: bool
+    failure_reason: str | None
+    median_abs_z: float
+    min_observations: int
+    average_observations: float
+
+    @property
+    def is_success(self) -> bool:
+        return self.payload is not None and not self.ambiguous
+
+
+def _v52_pn_bit(index: int) -> bool:
+    value = (int(index) * 0x9E3779B9 + 0x7F4A7C15) & 0xFFFFFFFF
+    value ^= value >> 16
+    value = (value * 0x85EBCA6B) & 0xFFFFFFFF
+    value ^= value >> 13
+    return bool(value & 1)
+
+
+def _v52_chroma_companion(amplitude: int) -> int:
+    # Swift's Double.rounded() uses nearest with ties away from zero. None of
+    # the supported amplitudes is a half-way value, but spelling this out keeps
+    # the Python and Swift integer paths independent of Python's bankers round.
+    ideal = math.floor(0.114 * amplitude / 0.886 + 0.5)
+    return max(1, min(amplitude, ideal))
+
+
+def v52_make_tile(payload: WatermarkPayloadV52 | bytes, alpha: int = 8,
+                  plane: str = "chroma", sync: str = V52_SYNC_NONE) -> np.ndarray:
+    """Create one v5.2 tile using the same premultiplied RGBA values as Swift."""
+    if isinstance(payload, WatermarkPayloadV52):
+        message = payload.bytes
+    else:
+        message = bytes(payload)
+        if WatermarkPayloadV52.from_bytes(message) is None:
+            raise ValueError("v5.2 payload must pass profile, field, reserved, and CRC checks")
+    if len(message) != V52_PAYLOAD_BYTE_COUNT:
+        raise ValueError("v5.2 payload must be 26 bytes")
+    if not 2 <= int(alpha) <= 255:
+        raise ValueError("v5.2 alpha must be in 2...255")
+    if plane not in ("luma", "chroma") or sync not in (V52_SYNC_NONE, V52_SYNC_PN, V52_SYNC_SEPARATED):
+        raise ValueError("invalid v5.2 plane or sync mode")
+
+    codeword = V52BCH.encode(message)
+    tile = np.zeros((TILE, TILE, 4), dtype=np.uint8)
+    pilot_amplitude = 0 if sync == V52_SYNC_NONE or plane == "luma" else max(1, min(2, int(alpha) // 4))
+    data_amplitude = max(1, int(alpha) - pilot_amplitude)
+    companion = _v52_chroma_companion(data_amplitude)
+
+    for pair in range(PAIRS_PER_TILE):
+        row, col = divmod(pair, PAIRS_PER_ROW)
+        code_index = pair % V52_CODEWORD_BITS
+        data_bit = bool(codeword[code_index >> 3] & (1 << (code_index & 7)))
+        if pair >= V52_CODEWORD_BITS:
+            data_bit = not data_bit
+        if sync == V52_SYNC_NONE:
+            pilot_bit = False
+        else:
+            pilot_index = pair if sync == V52_SYNC_PN else pair % V52_CODEWORD_BITS
+            pilot_bit = _v52_pn_bit(pilot_index)
+        x = col * BLOCK * 2
+        y = row * BLOCK
+
+        def paint(x0: int, dark: bool, pilot_on: bool) -> None:
+            if plane == "luma":
+                value = 0 if dark else data_amplitude
+                colour = (value, value, value, alpha)
+            else:
+                r = companion if dark else 0
+                g = r
+                b = 0 if dark else data_amplitude
+                if pilot_on:
+                    r += pilot_amplitude
+                    g += pilot_amplitude
+                    b += pilot_amplitude
+                colour = (min(alpha, r), min(alpha, g), min(alpha, b), alpha)
+            tile[y:y + BLOCK, x0:x0 + BLOCK] = colour
+
+        paint(x, data_bit, pilot_bit)
+        paint(x + BLOCK, not data_bit, False if sync == V52_SYNC_NONE else not pilot_bit)
+    return tile
+
+
+def _v52_integral_at(sat: np.ndarray, x, y) -> np.ndarray:
+    """Bilinear interpolation of an integral image, mirroring Swift Integral.at."""
+    height, width = sat.shape[0] - 1, sat.shape[1] - 1
+    xx = np.clip(np.asarray(x, dtype=np.float64), 0.0, float(width))
+    yy = np.clip(np.asarray(y, dtype=np.float64), 0.0, float(height))
+    x0 = np.floor(xx).astype(np.int64)
+    y0 = np.floor(yy).astype(np.int64)
+    x1 = np.minimum(width, x0 + 1)
+    y1 = np.minimum(height, y0 + 1)
+    fx = xx - x0
+    fy = yy - y0
+    top = sat[y0, x0] * (1.0 - fx) + sat[y0, x1] * fx
+    bottom = sat[y1, x0] * (1.0 - fx) + sat[y1, x1] * fx
+    return top * (1.0 - fy) + bottom * fy
+
+
+def _v52_rect_means(sat: np.ndarray, xs: np.ndarray, ys: np.ndarray, size: float) -> np.ndarray:
+    x = np.asarray(xs, dtype=np.float64)[None, :]
+    y = np.asarray(ys, dtype=np.float64)[:, None]
+    x1 = np.minimum(float(sat.shape[1] - 1), x + size)
+    y1 = np.minimum(float(sat.shape[0] - 1), y + size)
+    total = (_v52_integral_at(sat, x1, y1) - _v52_integral_at(sat, x, y1)
+             - _v52_integral_at(sat, x1, y) + _v52_integral_at(sat, x, y))
+    area = (x1 - x) * (y1 - y)
+    return np.divide(total, area, out=np.zeros_like(total), where=area > 0)
+
+
+def _v52_accumulate(sat: np.ndarray, image: np.ndarray, scale: float,
+                    offset_x: int, offset_y: int, sync: str,
+                    luma_sat: np.ndarray | None) -> V52PairStats | None:
+    if not math.isfinite(float(scale)) or scale <= 0 or offset_x < 0 or offset_y < 0:
+        return None
+    block = BLOCK * float(scale)
+    height, width = image.shape[:2]
+    if width - offset_x < block * 2 or height - offset_y < block:
+        return None
+    rows = int(math.floor((height - offset_y) / block))
+    cols = int(math.floor((width - offset_x) / (block * 2)))
+    if rows <= 0 or cols <= 0:
+        return None
+    xs = float(offset_x) + np.arange(cols, dtype=np.float64) * block * 2.0
+    ys = float(offset_y) + np.arange(rows, dtype=np.float64) * block
+    left = _v52_rect_means(sat, xs, ys, block)
+    right = _v52_rect_means(sat, xs + block, ys, block)
+    difference = left - right
+    local_index = ((np.arange(rows, dtype=np.int64)[:, None] % BLOCK_ROWS_PER_TILE) * PAIRS_PER_ROW
+                   + (np.arange(cols, dtype=np.int64)[None, :] % PAIRS_PER_ROW))
+
+    stats = V52PairStats.empty()
+    keep = np.abs(difference) >= V52_MIN_MAGNITUDE
+    flat_index = local_index[keep]
+    flat_difference = difference[keep]
+    np.add.at(stats.sums, flat_index, flat_difference)
+    np.add.at(stats.squares, flat_index, flat_difference * flat_difference)
+    np.add.at(stats.counts, flat_index, 1)
+    stats.abs_sum = float(np.abs(flat_difference).sum())
+    stats.observed = int(flat_difference.size)
+
+    if luma_sat is not None and sync != V52_SYNC_NONE:
+        pilot_difference = (_v52_rect_means(luma_sat, xs, ys, block)
+                             - _v52_rect_means(luma_sat, xs + block, ys, block))
+        np.add.at(stats.pilot_sums, local_index.ravel(), pilot_difference.ravel())
+        np.add.at(stats.pilot_squares, local_index.ravel(), (pilot_difference * pilot_difference).ravel())
+        np.add.at(stats.pilot_counts, local_index.ravel(), 1)
+    return stats
+
+
+def _v52_fold(stats: V52PairStats, rotation: int, sync: str) -> V52Folded:
+    row_shift, col_shift = divmod(int(rotation), PAIRS_PER_ROW)
+    shifted = (((_V52_PAIR_ROWS + row_shift) % BLOCK_ROWS_PER_TILE) * PAIRS_PER_ROW
+               + (_V52_PAIR_COLS + col_shift) % PAIRS_PER_ROW)
+    code_index = shifted % V52_CODEWORD_BITS
+    copy_sign = np.where(shifted >= V52_CODEWORD_BITS, -1.0, 1.0)
+    sums = np.bincount(code_index, weights=copy_sign * stats.sums, minlength=V52_CODEWORD_BITS)
+    squares = np.bincount(code_index, weights=stats.squares, minlength=V52_CODEWORD_BITS)
+    counts = np.bincount(code_index, weights=stats.counts, minlength=V52_CODEWORD_BITS)
+    scores = np.zeros(V52_CODEWORD_BITS, dtype=np.float64)
+    usable = counts >= 2
+    n = counts[usable].astype(np.float64)
+    mean = sums[usable] / n
+    variance = np.maximum(squares[usable] / n - mean * mean, MIN_VARIANCE)
+    scores[usable] = mean / np.sqrt(variance / n)
+
+    pilot_score = 0.0
+    if sync != V52_SYNC_NONE and stats.pilot_counts.sum() > 0:
+        if sync == V52_SYNC_PN:
+            pilot_indices = shifted
+        else:
+            pilot_indices = shifted % V52_CODEWORD_BITS
+        expected = np.where(np.fromiter((_v52_pn_bit(int(i)) for i in pilot_indices), dtype=bool), 1.0, -1.0)
+        numerator = float(np.sum(expected * stats.pilot_sums))
+        denominator = float(np.sum(stats.pilot_squares))
+        pilot_score = numerator / math.sqrt(denominator * max(1, int(stats.pilot_counts.sum()))) if denominator > 0 else 0.0
+    absolute = np.sort(np.abs(scores[scores != 0]))
+    return V52Folded(
+        scores=scores,
+        counts=counts,
+        signal=stats.abs_sum / stats.observed if stats.observed else 0.0,
+        pilot_score=pilot_score,
+        median_abs_z=float(absolute[absolute.size // 2]) if absolute.size else 0.0,
+        min_observations=int(counts.min()) if counts.size else 0,
+        average_observations=stats.observed / V52_CODEWORD_BITS,
+    )
+
+
+@dataclass
+class _V52Candidate:
+    payload: WatermarkPayloadV52
+    codeword_bytes: bytes
+    corrected_bits: int
+    soft_recovery_used: bool
+    plane: str
+    sync: str
+    scale: float
+    offset_x: int
+    offset_y: int
+    pilot_score: float
+    median_abs_z: float
+    min_observations: int
+    average_observations: float
+    score: float
+
+
+def _v52_try_candidate(raw: bytes, folded: V52Folded, hard: bytes,
+                       plane: str, sync: str, scale: float, offset_x: int,
+                       offset_y: int, soft: bool) -> _V52Candidate | None:
+    corrected = V52BCH.decode(raw)
+    if corrected is None:
+        return None
+    payload = WatermarkPayloadV52.from_bytes(corrected.message_bytes)
+    if payload is None:
+        return None
+    corrected_bits = sum((a ^ b).bit_count() for a, b in zip(hard, corrected.codeword_bytes))
+    return _V52Candidate(
+        payload=payload,
+        codeword_bytes=corrected.codeword_bytes,
+        corrected_bits=corrected_bits,
+        soft_recovery_used=soft,
+        plane=plane,
+        sync=sync,
+        scale=scale,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        pilot_score=folded.pilot_score,
+        median_abs_z=folded.median_abs_z,
+        min_observations=folded.min_observations,
+        average_observations=folded.average_observations,
+        score=folded.median_abs_z - corrected_bits * 0.25 + folded.pilot_score * 0.05,
+    )
+
+
+def _v52_collect_candidates(stats: V52PairStats, rotations, plane: str, sync: str,
+                            scale: float, offset_x: int, offset_y: int,
+                            max_chase_bits: int, max_chase_flips: int) -> list[_V52Candidate]:
+    candidates: list[_V52Candidate] = []
+    # Scan all rotations for a hard hit before spending the bounded Chase
+    # budget. Otherwise early wrong rotations can consume the budget and hide
+    # a later exact copy.
+    pending_soft: list[tuple[V52Folded, bytes]] = []
+    for rotation in rotations:
+        folded = _v52_fold(stats, rotation, sync)
+        hard = _v52_pack(folded.scores < 0)
+        hard_candidate = _v52_try_candidate(hard, folded, hard, plane, sync, scale, offset_x, offset_y, False)
+        if hard_candidate is not None:
+            candidates.append(hard_candidate)
+            continue
+        pending_soft.append((folded, hard))
+    # Exact candidates are stronger evidence than bounded soft recovery.
+    if candidates:
+        return candidates
+    soft_attempts = 0
+    max_soft_attempts = 256
+    for folded, hard in pending_soft:
+        if max_chase_flips <= 0 or soft_attempts >= max_soft_attempts:
+            break
+        ranked = np.argsort(np.abs(folded.scores))[:max(0, min(max_chase_bits, V52_CODEWORD_BITS))]
+        if not len(ranked):
+            continue
+        for flip_count in range(1, min(max_chase_flips, len(ranked)) + 1):
+            for combination in itertools.combinations((int(i) for i in ranked), flip_count):
+                if soft_attempts >= max_soft_attempts:
+                    break
+                soft_attempts += 1
+                bits = folded.scores < 0
+                bits = bits.copy()
+                bits[list(combination)] = ~bits[list(combination)]
+                candidate = _v52_try_candidate(_v52_pack(bits), folded, hard, plane, sync,
+                                                scale, offset_x, offset_y, True)
+                if candidate is not None:
+                    candidates.append(candidate)
+            if soft_attempts >= max_soft_attempts:
+                break
+    return candidates
+
+
+def _v52_adjudicate(candidates: list[_V52Candidate]) -> V52Decoded | None:
+    if not candidates:
+        return None
+    by_payload: dict[bytes, _V52Candidate] = {}
+    for candidate in candidates:
+        key = candidate.payload.bytes
+        if key not in by_payload or by_payload[key].score < candidate.score:
+            by_payload[key] = candidate
+    distinct = sorted(by_payload.values(), key=lambda candidate: candidate.score, reverse=True)
+    best = distinct[0]
+    ambiguous = len(distinct) > 1
+    return V52Decoded(
+        payload=None if ambiguous else best.payload,
+        codeword_bytes=None if ambiguous else best.codeword_bytes,
+        plane=best.plane,
+        sync=best.sync,
+        offset_x=best.offset_x,
+        offset_y=best.offset_y,
+        estimated_scale=best.scale,
+        corrected_bits=best.corrected_bits,
+        soft_recovery_used=best.soft_recovery_used,
+        pilot_score=best.pilot_score,
+        candidate_count=len(candidates),
+        ambiguous=ambiguous,
+        failure_reason="multiple distinct CRC-valid payloads" if ambiguous else None,
+        median_abs_z=best.median_abs_z,
+        min_observations=best.min_observations,
+        average_observations=best.average_observations,
+    )
+
+
+def v52_decode(image: np.ndarray, plane: str = "chroma", sync: str = V52_SYNC_NONE,
+               scale: float = 1.0, offset_x: int = 0, offset_y: int = 0,
+               search_tile: bool = False, max_chase_bits: int = V52_DEFAULT_CHASE_BITS,
+               max_chase_flips: int = V52_DEFAULT_CHASE_FLIPS) -> V52Decoded | None:
+    if plane not in ("luma", "chroma") or sync not in (V52_SYNC_NONE, V52_SYNC_PN, V52_SYNC_SEPARATED):
+        return None
+    sat = integral_image(feature_plane(image, plane))
+    luma_sat = integral_image(feature_plane(image, "luma")) if sync != V52_SYNC_NONE else None
+    stats = _v52_accumulate(sat, image, scale, offset_x, offset_y, sync, luma_sat)
+    if stats is None:
+        return None
+    rotations = range(PAIRS_PER_TILE) if search_tile else (0,)
+    candidates = _v52_collect_candidates(stats, rotations, plane, sync, float(scale), offset_x, offset_y,
+                                          max_chase_bits, max_chase_flips)
+    return _v52_adjudicate(candidates)
+
+
+@dataclass
+class _V52Context:
+    stats: V52PairStats
+    plane: str
+    sync: str
+    scale: float
+    offset_x: int
+    offset_y: int
+    score: float
+
+
+def v52_decode_best(image: np.ndarray, scales=None, planes=("chroma", "luma"),
+                    sync_modes=(V52_SYNC_NONE,), search_phase: bool = True,
+                    search_tile: bool = True, max_contexts: int = 16,
+                    max_chase_bits: int = V52_DEFAULT_CHASE_BITS,
+                    max_chase_flips: int = V52_DEFAULT_CHASE_FLIPS) -> V52Decoded | None:
+    if scales is None:
+        scales = V52_DEFAULT_SCALES
+    scales = [float(value) for value in scales if math.isfinite(float(value)) and float(value) > 0]
+    planes = [plane for plane in planes if plane in ("luma", "chroma")]
+    sync_modes = [mode for mode in sync_modes if mode in (V52_SYNC_NONE, V52_SYNC_PN, V52_SYNC_SEPARATED)]
+    if not scales or not planes or not sync_modes:
+        return None
+    height, width = image.shape[:2]
+    chroma_sat = integral_image(feature_plane(image, "chroma"))
+    luma_sat = integral_image(feature_plane(image, "luma"))
+    pilot_sat = luma_sat if any(mode != V52_SYNC_NONE for mode in sync_modes) else None
+    contexts: list[_V52Context] = []
+    for scale in scales:
+        block = BLOCK * scale
+        phase_x_count = max(1, math.ceil(block * 2)) if search_phase else 1
+        phase_y_count = max(1, math.ceil(block)) if search_phase else 1
+        for plane in planes:
+            sat = chroma_sat if plane == "chroma" else luma_sat
+            for sync in sync_modes:
+                for offset_y in range(phase_y_count):
+                    for offset_x in range(phase_x_count):
+                        stats = _v52_accumulate(sat, image, scale, offset_x, offset_y, sync, pilot_sat)
+                        if stats is None:
+                            continue
+                        folded = _v52_fold(stats, 0, sync)
+                        if folded.counts.min() <= 0:
+                            continue
+                        contexts.append(_V52Context(stats, plane, sync, scale, offset_x, offset_y,
+                                                   folded.median_abs_z + abs(folded.pilot_score) * 0.05))
+    if not contexts:
+        return None
+    contexts.sort(key=lambda context: context.score, reverse=True)
+    coarse = contexts[:max(1, min(max_contexts, len(contexts)))]
+    seeds: list[_V52Context] = []
+    seen: set[str] = set()
+    for context in coarse:
+        key = f"{context.plane}:{context.sync}:{round(context.scale * 100)}"
+        if key not in seen:
+            seen.add(key)
+            seeds.append(context)
+        if len(seeds) >= min(4, max(1, max_contexts)):
+            break
+
+    def evaluate(seed: _V52Context, value: float, offset_x: int, offset_y: int) -> _V52Context | None:
+        if not 0.5 <= value <= 1.5 or not math.isfinite(value):
+            return None
+        sat = chroma_sat if seed.plane == "chroma" else luma_sat
+        stats = _v52_accumulate(sat, image, value, offset_x, offset_y, seed.sync,
+                                luma_sat if seed.sync != V52_SYNC_NONE else None)
+        if stats is None:
+            return None
+        folded = _v52_fold(stats, 0, seed.sync)
+        if folded.counts.min() <= 0:
+            return None
+        return _V52Context(stats, seed.plane, seed.sync, value, offset_x, offset_y,
+                           folded.median_abs_z + abs(folded.pilot_score) * 0.05)
+
+    finalists: list[_V52Context] = []
+    for seed in seeds:
+        best = seed
+        fine = max(0.5, seed.scale - 0.05)
+        while fine <= min(1.5, seed.scale + 0.05) + 1e-9:
+            probe = evaluate(seed, fine, seed.offset_x, seed.offset_y)
+            if probe is not None and probe.score > best.score:
+                best = probe
+            fine += 0.005
+        step = 0.025
+        tolerance = 0.5 / max(width, height)
+        while step > tolerance:
+            best_probe = best
+            for value in (best.scale - step, best.scale, best.scale + step):
+                for offset_y in range(max(0, best.offset_y - 1), best.offset_y + 2):
+                    for offset_x in range(max(0, best.offset_x - 1), best.offset_x + 2):
+                        probe = evaluate(best, value, offset_x, offset_y)
+                        if probe is not None and probe.score > best_probe.score:
+                            best_probe = probe
+            best = best_probe
+            step *= 0.5
+        finalists.append(best)
+
+    rotations = range(PAIRS_PER_TILE) if search_tile else (0,)
+    candidates: list[_V52Candidate] = []
+    for context in finalists:
+        candidates.extend(_v52_collect_candidates(context.stats, rotations, context.plane, context.sync,
+                                                   context.scale, context.offset_x, context.offset_y,
+                                                   max_chase_bits, max_chase_flips))
+    return _v52_adjudicate(candidates)
 # MARK: - CLI
 
 
@@ -650,8 +1587,9 @@ def warn(message: str) -> None:
 
 def usage() -> str:
     return (
-        "用法: bwdecode.py <截图路径> [--bits N] [--offset X,Y] [--auto-offset] "
-        "[--plane luma|chroma] [--layout] [--key <hex>] [--pages <json>] [--auto] [--dump-codes]"
+        "用法: bwdecode.py <截图路径> [--protocol v4|v5.2|auto] [--bits N] [--offset X,Y] "
+        "[--auto-offset] [--plane luma|chroma] [--pilot none|pn|separated] [--scale N] "
+        "[--layout] [--key <hex>] [--pages <json>] [--auto] [--dump-codes]"
     )
 
 
@@ -659,12 +1597,45 @@ def parse_args(argv: list[str]) -> dict:
     options = {
         "path": None, "payload_bits": PAYLOAD_BITS, "offset": (0, 0), "auto_offset": False,
         "explicit_offset": False, "plane": "chroma", "layout": False, "key": None,
-        "pages": None, "auto": False, "dump_codes": False,
+        "pages": None, "auto": False, "dump_codes": False, "protocol": "v4",
+        "pilot": V52_SYNC_NONE, "scale": None,
+        "bits_explicit": False,
     }
     index = 0
     while index < len(argv):
         argument = argv[index]
-        if argument == "--bits":
+        if argument in ("--protocol", "--version"):
+            index += 1
+            if index >= len(argv):
+                fail("--protocol 需要 v4、v5.2 或 auto", 2)
+            value = argv[index].lower()
+            if value in ("v4", "4"):
+                options["protocol"] = "v4"
+            elif value in ("v5.2", "v52", "5.2"):
+                options["protocol"] = "v5.2"
+            elif value == "auto":
+                options["protocol"] = "auto"
+            else:
+                fail("--protocol 需要 v4、v5.2 或 auto", 2)
+        elif argument == "--v52":
+            options["protocol"] = "v5.2"
+        elif argument == "--pilot":
+            index += 1
+            if index >= len(argv) or argv[index] not in (V52_SYNC_NONE, V52_SYNC_PN, V52_SYNC_SEPARATED):
+                fail("--pilot 需要 none、pn 或 separated", 2)
+            options["pilot"] = argv[index]
+        elif argument == "--scale":
+            index += 1
+            if index >= len(argv):
+                fail("--scale 需要一个大于 0 的数，例如 0.837", 2)
+            try:
+                value = float(argv[index])
+            except ValueError:
+                value = float("nan")
+            if not math.isfinite(value) or value <= 0 or value > 4:
+                fail("--scale 需要一个大于 0 的数，例如 0.837", 2)
+            options["scale"] = value
+        elif argument == "--bits":
             index += 1
             if index >= len(argv) or not argv[index].lstrip("-").isdigit():
                 fail(f"--bits 需要 1...{MAX_PAYLOAD_BITS} 的整数", 2)
@@ -672,6 +1643,7 @@ def parse_args(argv: list[str]) -> dict:
             if not 1 <= value <= MAX_PAYLOAD_BITS:
                 fail(f"--bits 需要 1...{MAX_PAYLOAD_BITS} 的整数", 2)
             options["payload_bits"] = value
+            options["bits_explicit"] = True
         elif argument == "--offset":
             index += 1
             parts = argv[index].split(",") if index < len(argv) else []
@@ -842,15 +1814,68 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
         print(build_clock_line(fields.build))
 
 
+def print_v52_result(result: V52Decoded, layout: bool) -> bool:
+    """Print a successful v5.2 result; return false for ambiguity/failure."""
+    if result.ambiguous:
+        warn("v5.2 找到多个不同的 CRC-valid payload，拒绝按首个结果裁决 "
+             f"（候选 {result.candidate_count} 个）")
+        return False
+    if result.payload is None:
+        warn("v5.2 未找到 BCH + CRC-valid payload "
+             f"（{result.failure_reason or '图像太小、相位或缩放不匹配'}）")
+        return False
+    payload = result.payload
+    print(
+        f"protocol=v5.2 payload=0x{payload.bytes.hex()}  plane={result.plane}  "
+        f"pilot={result.sync}  phase=({result.offset_x},{result.offset_y})  "
+        f"scale={result.estimated_scale:.4f}  correctedBits={result.corrected_bits}  "
+        f"softRecovery={'true' if result.soft_recovery_used else 'false'}  "
+        f"pilotScore={result.pilot_score:.3f}  candidateCount={result.candidate_count}"
+    )
+    if not layout:
+        return True
+    stamp = datetime.datetime.fromtimestamp(payload.timestamp, datetime.timezone.utc)
+    build = datetime.datetime.fromtimestamp(payload.build_time, datetime.timezone.utc)
+    note = payload.note or "（空）"
+    print(
+        f"uid={payload.uid}(0x{payload.uid:08X})  time={stamp.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
+        f"page={payload.page_name_code}  buildTime={build.strftime('%Y-%m-%d %H:%M:%S')} UTC  "
+        f"app={payload.app}  note={note}  profile={V52_PROFILE}  crcStatus=OK"
+    )
+    return True
+
+
 def main(argv: list[str]) -> int:
     options = parse_args(argv)
+
+    # Bare --auto keeps the historical v4 phase/plane search. Mixed protocol
+    # detection is opt-in through the explicit --protocol auto spelling.
+    if options["protocol"] == "auto":
+        options["auto"] = True
 
     if options["auto_offset"] and options["explicit_offset"]:
         fail("--auto-offset 与 --offset 互斥：前者就是自动求后者，同时给无法判断以哪个为准", 2)
     if options["auto_offset"] and options["auto"]:
         fail("--auto-offset 与 --auto 语义重叠：--auto 已经穷举相位 / 平面 / 位数，单独用 --auto 即可", 2)
 
+    if options["protocol"] == "v5.2":
+        if options["bits_explicit"]:
+            fail("v5.2 的物理码字固定为 256 bit（信息字段 207 bit），不要传 v4 的 --bits", 2)
+        if options["key"] is not None:
+            fail("v5.2 只有 CRC24，没有 v4 的 HMAC；请去掉 --key", 2)
+        if options["pages"] is not None:
+            fail("--pages 是 v4 的 15 字符注册表；v5.2 只输出 8 字符 compact page code，请去掉 --pages", 2)
+    elif options["protocol"] == "auto":
+        if options["key"] is not None:
+            warn("--protocol auto 带 --key 时，v5.2 分支仍只验证 CRC24（不使用 HMAC）；若需强制验签请显式 --protocol v4")
+        if options["bits_explicit"]:
+            warn("--protocol auto 的 v5.2 探测固定 256-bit 码字，忽略 --bits；v4 回退仍使用该参数")
+        if options["pages"] is not None:
+            warn("--pages 仅用于 v4 回退；v5.2 输出 compact page code，不使用旧 15 字符注册表")
+
     if options["dump_codes"]:
+        if options["protocol"] == "v5.2":
+            fail("--dump-codes 当前只支持 v4 页面注册表；v5.2 请使用 compact page code 定位", 2)
         if options["pages"] is None:
             fail("--dump-codes 需要配合 --pages 使用", 2)
         # 列宽 = codeLength + 1：短码最长 10 字符，截断会把 darkmode 显示成 darkmo
@@ -863,6 +1888,30 @@ def main(argv: list[str]) -> int:
         fail(usage(), 2)
     image = load_image(options["path"])
     key = options["key"]
+
+    if options["protocol"] in ("v5.2", "auto"):
+        explicit_v52 = options["protocol"] == "v5.2"
+        scales = ([options["scale"]] if options["scale"] is not None
+                  else (list(V52_DEFAULT_SCALES) if options["auto"] else [1.0]))
+        if explicit_v52 and not options["auto"] and not options["auto_offset"]:
+            v52_result = v52_decode(
+                image, plane=options["plane"], sync=options["pilot"],
+                scale=options["scale"] or 1.0, offset_x=options["offset"][0],
+                offset_y=options["offset"][1], search_tile=False,
+            )
+        else:
+            v52_result = v52_decode_best(
+                image, scales=scales,
+                planes=(options["plane"],) if explicit_v52 else ("chroma", "luma"),
+                sync_modes=(options["pilot"],), search_phase=True,
+                search_tile=(options["auto"] or options["auto_offset"]) if explicit_v52 else True,
+            )
+        if v52_result is not None:
+            if print_v52_result(v52_result, options["layout"]):
+                return 0
+            fail("v5.2 解码未形成唯一的 BCH + CRC-valid 结果", 1)
+        if explicit_v52:
+            fail("v5.2 解码失败：未找到 BCH + CRC-valid 结果，请检查 --plane/--pilot/--scale/--offset", 1)
 
     if options["auto"]:
         candidates = [PAYLOAD_BITS]

@@ -91,6 +91,38 @@ def shot(payload: bytes, plane: str, offset: tuple[int, int], alpha: int = 8,
     return canvas
 
 
+def v52_shot(payload: bwdecode.WatermarkPayloadV52, offset: tuple[int, int] = (0, 0),
+             alpha: int = 8, plane: str = "chroma", sync: str = bwdecode.V52_SYNC_NONE,
+             width: int = 640, height: int = 900) -> np.ndarray:
+    """v5.2 合成图：固定灰底、预乘 RGBA 平铺，和 Swift V52Tests 同一几何。"""
+    canvas = np.zeros((height, width, 4), dtype=np.uint8)
+    canvas[:, :, :3] = 200
+    canvas[:, :, 3] = 255
+    tile = bwdecode.v52_make_tile(payload, alpha=alpha, plane=plane, sync=sync)
+    dx, dy = offset
+    y = dy - bwdecode.TILE
+    while y < height:
+        x = dx - bwdecode.TILE
+        while x < width:
+            _blend(canvas, tile, x, y)
+            x += bwdecode.TILE
+        y += bwdecode.TILE
+    return canvas
+
+
+def resize_nearest(image: np.ndarray, scale: float) -> np.ndarray:
+    height, width = image.shape[:2]
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    output = np.zeros((new_height, new_width, 4), dtype=np.uint8)
+    for y in range(new_height):
+        source_y = min(height - 1, int(y / scale))
+        for x in range(new_width):
+            source_x = min(width - 1, int(x / scale))
+            output[y, x] = image[source_y, source_x]
+    return output
+
+
 def _blend(dst: np.ndarray, top: np.ndarray, dx: int, dy: int) -> None:
     """预乘 alpha 合成，整数运算与 Swift 的 `RGBAImage.blend` 一致。"""
     height, width = dst.shape[:2]
@@ -394,6 +426,79 @@ def test_insufficient_observations() -> None:
         shutil.rmtree(folder)
 
 
+def test_v52() -> bwdecode.WatermarkPayloadV52:
+    print("v5.2 紧凑载荷 / BCH / 缩放路径")
+    legacy_auto = bwdecode.parse_args(["--auto"])
+    mixed_auto = bwdecode.parse_args(["--protocol", "auto"])
+    check(legacy_auto["protocol"] == "v4" and legacy_auto["auto"],
+          "裸 --auto 保留 v4 历史搜索语义")
+    check(mixed_auto["protocol"] == "auto", "混合协议探测必须显式 --protocol auto")
+    payload = bwdecode.WatermarkPayloadV52.from_codes(
+        0x1234_5678, 1_234_567, 89_012, "profile", 42, "hotfix")
+    assert payload is not None
+    check(payload.bytes.hex() == "8167452371682d01a0dd0a50ffa86faf4a0520236ff49078f702",
+          "207-bit payload golden vector")
+    codeword = bwdecode.V52BCH.encode(payload.bytes)
+    check(codeword.hex() == "dbf79d8bb6998167452371682d01a0dd0a50ffa86faf4a0520236ff49078f782",
+          "BCH(255,207)+even parity golden vector")
+    restored = bwdecode.V52BCH.decode(codeword)
+    check(restored is not None and restored.message_bytes == payload.bytes and restored.corrected_bits == 0,
+          "BCH golden vector 回环")
+
+    damaged = bytearray(codeword)
+    for position in (0, 17, 63, 129, 211, 255):
+        damaged[position >> 3] ^= 1 << (position & 7)
+    corrected = bwdecode.V52BCH.decode(damaged)
+    check(corrected is not None and corrected.message_bytes == payload.bytes and corrected.corrected_bits == 6,
+          "BCH 六位错误可纠正（含扩展偶校验位）")
+
+    image = v52_shot(payload, offset=(3, 5))
+    direct = bwdecode.v52_decode(image, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                                 scale=1.0, offset_x=3, offset_y=5, search_tile=True)
+    check(direct is not None and direct.is_success and direct.payload == payload,
+          "v5.2 baseline：预乘 chroma tile 回环")
+    check(direct is not None and direct.corrected_bits == 0 and direct.candidate_count == 1,
+          "v5.2 baseline：无软恢复且候选唯一")
+
+    cropped = bwdecode.v52_decode_best(
+        image[13:, 9:], scales=[1.0], planes=("chroma",),
+        sync_modes=(bwdecode.V52_SYNC_NONE,), search_phase=True, search_tile=True, max_contexts=4)
+    check(cropped is not None and cropped.is_success and cropped.payload == payload,
+          "v5.2：未知 phase + tile rotation 的裁剪图解回")
+
+    resized = resize_nearest(v52_shot(payload), 0.837)
+    explicit = bwdecode.v52_decode(resized, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                                   scale=0.837, offset_x=0, offset_y=0, search_tile=True)
+    check(explicit is not None and explicit.is_success and explicit.payload == payload,
+          "v5.2：显式 0.837 等比缩放")
+    searched = bwdecode.v52_decode_best(
+        resized, scales=[0.80, 0.85, 0.90], planes=("chroma",),
+        sync_modes=(bwdecode.V52_SYNC_NONE,), search_phase=False, search_tile=True, max_contexts=4)
+    check(searched is not None and searched.is_success and searched.payload == payload,
+          "v5.2：不在粗网格的比例由局部精搜解回")
+    estimated_scale = searched.estimated_scale if searched is not None else float("nan")
+    check(searched is not None and abs(searched.estimated_scale - 0.837) < 0.003,
+          f"v5.2：估计比例接近真值（{estimated_scale:.4f}）")
+
+    for sync in (bwdecode.V52_SYNC_PN, bwdecode.V52_SYNC_SEPARATED):
+        pilot_image = v52_shot(payload, offset=(3, 5), sync=sync)
+        pilot = bwdecode.v52_decode(pilot_image, plane="chroma", sync=sync,
+                                    scale=1.0, offset_x=3, offset_y=5, search_tile=True)
+        check(pilot is not None and pilot.is_success and pilot.payload == payload,
+              f"v5.2 pilot={sync}：数据回环")
+        pilot_score = pilot.pilot_score if pilot is not None else float("nan")
+        check(pilot is not None and pilot.pilot_score > 0.1,
+              f"v5.2 pilot={sync}：相关性指标可测（{pilot_score:.3f}）")
+
+    plain = np.zeros((900, 640, 4), dtype=np.uint8)
+    plain[:, :, :3] = 200
+    plain[:, :, 3] = 255
+    check(bwdecode.v52_decode(plain, plane="chroma", sync=bwdecode.V52_SYNC_NONE,
+                              scale=1.0, search_tile=True) is None,
+          "v5.2 纯色负样本无 CRC-valid 候选")
+    return payload
+
+
 def test_swift_cross_check(payload: bytes) -> None:
     print("与 Swift bwdecode 对账")
     if not os.path.exists(SWIFT_CLI):
@@ -448,6 +553,42 @@ def test_swift_cross_check(payload: bytes) -> None:
               "--auto 裁剪图：两条实现给出同一份 payload")
 
 
+def test_swift_v52_cross_check(payload: bwdecode.WatermarkPayloadV52) -> None:
+    print("v5.2 与 Swift bwdecode 对账")
+    if not os.path.exists(SWIFT_CLI):
+        print(f"  跳过：没有 {SWIFT_CLI}（先 swift build -c release）")
+        return
+    image = v52_shot(payload, offset=(0, 0))
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "v52.png")
+        Image.fromarray(image, mode="RGBA").save(path)
+        python_result = subprocess.run(
+            [sys.executable, os.path.join(REPO, "tools", "bwdecode.py"), path,
+             "--protocol", "v5.2", "--layout", "--scale", "1"],
+            capture_output=True, text=True, check=True,
+        )
+        swift_result = subprocess.run(
+            [SWIFT_CLI, path, "--protocol", "v5.2", "--layout", "--scale", "1"],
+            capture_output=True, text=True, check=True,
+        )
+        first = f"payload=0x{payload.bytes.hex()}"
+        check(first in python_result.stdout.splitlines()[0], "Python v5.2 CLI 输出 golden payload")
+        check(first in swift_result.stdout.splitlines()[0], "Swift v5.2 CLI 输出同一份 payload")
+        check(python_result.stdout.splitlines()[1] == swift_result.stdout.splitlines()[1],
+              "同一张 PNG：Python 与 Swift v5.2 字段行一致")
+        check("crcStatus=OK" in swift_result.stdout and "correctedBits=0" in swift_result.stdout,
+              "Swift v5.2 CLI 明确报告 CRC 与纠错诊断")
+
+        cropped_path = os.path.join(folder, "v52-cropped.png")
+        Image.fromarray(image[13:, 9:], mode="RGBA").save(cropped_path)
+        swift_cropped = subprocess.run(
+            [SWIFT_CLI, cropped_path, "--protocol", "v5.2", "--auto", "--layout"],
+            capture_output=True, text=True, check=True,
+        )
+        check(first in swift_cropped.stdout.splitlines()[0],
+              "Swift v5.2 CLI：未知 phase / tile rotation 裁剪图解回")
+
+
 def main() -> int:
     try:
         payload = test_round_trip()
@@ -460,7 +601,9 @@ def main() -> int:
         test_pair_offset()
         test_insufficient_observations()
         test_page_codec()
+        v52_payload = test_v52()
         test_swift_cross_check(payload)
+        test_swift_v52_cross_check(v52_payload)
     except AssertionError as error:
         print(f"\n失败: {error}", file=sys.stderr)
         return 1
