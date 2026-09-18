@@ -252,13 +252,20 @@ public enum V52Codec {
             }
         }
         guard !contexts.isEmpty else { return nil }
-        contexts.sort { $0.score > $1.score }
-        let coarseFinalists = contexts.prefix(max(1, min(maxContexts, contexts.count)))
+        // 粗筛按「比例」排名，不按单个上下文排名：一个比例有上百个相位，直接对上下文排序会让
+        // 同一比例的一堆相位挤满 top-16，真正的好比例（实测 1.173 这类非网格值）根本没机会进精搜
+        // —— 症状是"显式 --scale 能解，默认网格解不出"。
+        var bestPerScale = [String: Context]()
+        for context in contexts {
+            let key = "\(context.plane.rawValue):\(context.sync.rawValue):\(Int((context.scale * 200).rounded()))"
+            if let existing = bestPerScale[key], existing.score >= context.score { continue }
+            bestPerScale[key] = context
+        }
+        let ranked = bestPerScale.values.sorted { $0.score > $1.score }
+        let coarseFinalists = ranked.prefix(max(1, min(maxContexts, ranked.count)))
         var seeds = [Context]()
-        var seenSeeds = Set<String>()
         for context in coarseFinalists {
-            let key = "\(context.plane.rawValue):\(context.sync.rawValue):\(Int((context.scale * 100).rounded()))"
-            if seenSeeds.insert(key).inserted { seeds.append(context) }
+            seeds.append(context)
             if seeds.count >= min(4, max(1, maxContexts)) { break }
         }
         var finalists = [Context]()

@@ -1524,17 +1524,17 @@ def v52_decode_best(image: np.ndarray, scales=None, planes=("chroma", "luma"),
                                                    folded.median_abs_z + abs(folded.pilot_score) * 0.05))
     if not contexts:
         return None
-    contexts.sort(key=lambda context: context.score, reverse=True)
-    coarse = contexts[:max(1, min(max_contexts, len(contexts)))]
-    seeds: list[_V52Context] = []
-    seen: set[str] = set()
-    for context in coarse:
-        key = f"{context.plane}:{context.sync}:{round(context.scale * 100)}"
-        if key not in seen:
-            seen.add(key)
-            seeds.append(context)
-        if len(seeds) >= min(4, max(1, max_contexts)):
-            break
+    # 粗筛按「比例」排名，不按单个上下文排名：一个比例有上百个相位，直接对上下文排序会让
+    # 同一比例的一堆相位挤满 top-N，真正的好比例（实测 1.173 这类非网格值）根本没机会进精搜
+    # —— 症状是"显式 --scale 能解，默认网格解不出"。
+    best_per_scale: dict[str, _V52Context] = {}
+    for context in contexts:
+        key = f"{context.plane}:{context.sync}:{round(context.scale * 200)}"
+        current = best_per_scale.get(key)
+        if current is None or context.score > current.score:
+            best_per_scale[key] = context
+    ranked = sorted(best_per_scale.values(), key=lambda context: context.score, reverse=True)
+    seeds = ranked[:min(4, max(1, max_contexts))]
 
     def evaluate(seed: _V52Context, value: float, offset_x: int, offset_y: int) -> _V52Context | None:
         if not 0.5 <= value <= 1.5 or not math.isfinite(value):
@@ -1707,6 +1707,117 @@ def parse_args(argv: list[str]) -> dict:
     return options
 
 
+# 黑边检测阈值：与 Swift `RGBAImage.BorderTrimHeuristic` 一一对应。
+# 实测企业微信/CleanShot 转发图会在截图外套一层纯黑，圆角让边缘列的近黑占比只有 0.93~0.95。
+BORDER_DARK_LUMA = 32.0
+BORDER_MIN_DARK_COVERAGE = 0.90
+BORDER_MAX_TRIM_FRACTION = 0.25
+BORDER_PROBE_LUMA = 96.0
+BORDER_MIN_PROBE_COVERAGE = 0.30
+BORDER_PROBE_DEPTH = 8
+
+
+# 比例尺（粗定位）：水印在 x 方向是 [block, !block] 交替，所以水平自相关在 lag=block 处最负、
+# lag=2*block 处最正。用这个"谷 + 2 倍峰"的联合目标直接读出 block 边长 → scale，省掉 21 档粗网格。
+# 实测（合成 v5.2 图）：0.50/0.75/1.00/1.50 精确，1.173/1.30 误差 ≤1.3%，0.837 误差 4.5%；
+# 企业微信转发的真实缩放图误差 7.6%，所以只当**粗定位**，候选要留 ±10% 余量，失败再退回完整网格。
+SCALE_RULER_MIN_CONFIDENCE = 0.05
+SCALE_RULER_SPAN = 0.10
+SCALE_RULER_STEPS = 5
+SCALE_RULER_MIN_BLOCK = 3.5
+SCALE_RULER_MAX_BLOCK = 13.0
+
+
+def estimate_scale_ruler(image: np.ndarray, planes=("chroma", "luma")):
+    """用水平自相关的谷/峰联合目标估 block 边长，返回置信度最高的 (plane, scale, confidence)。
+
+    置信度 = 谷深（|ACF(block)|）。水印图实测 0.30~0.74，无水印纯色/彩色噪声 ≈ 0.00。
+    """
+    best = None
+    for plane in planes:
+        feature = feature_plane(image, plane).reshape(image.shape[:2]).astype(np.float64)
+        feature -= feature.mean()
+        width = feature.shape[1]
+        if width < int(SCALE_RULER_MAX_BLOCK * 2) + 2:
+            continue
+        nfft = 1 << int(np.ceil(np.log2(width + int(SCALE_RULER_MAX_BLOCK) + 1)))
+        spectrum = np.fft.rfft(feature, n=nfft, axis=1)
+        acf = np.fft.irfft(spectrum * np.conj(spectrum), n=nfft, axis=1)[:, :width].mean(axis=0)
+        if acf[0] <= 0:
+            continue
+        acf = acf / acf[0]
+        lags = np.arange(width, dtype=np.float64)
+        grid = np.arange(SCALE_RULER_MIN_BLOCK, SCALE_RULER_MAX_BLOCK, 0.01)
+        around = np.interp(grid, lags, acf)
+        doubled = np.interp(np.clip(2.0 * grid, 0.0, lags[-1]), lags, acf)
+        index = int(np.argmax(doubled - around))
+        confidence = float(-around[index])
+        candidate = (plane, float(grid[index]) / 8.0, confidence)
+        if best is None or candidate[2] > best[2]:
+            best = candidate
+    return best
+
+
+def ruler_candidate_scales(scale: float, span: float = SCALE_RULER_SPAN,
+                           steps: int = SCALE_RULER_STEPS) -> list[float]:
+    """按粗定位给的候选比例：span=0.10、steps=5 → 0.90/0.95/1.00/1.05/1.10 × scale。"""
+    ratios = [1.0 + span * (2.0 * i / (steps - 1) - 1.0) for i in range(steps)]
+    return sorted({round(scale * ratio, 4) for ratio in ratios if scale * ratio > 0})
+
+
+def trim_uniform_dark_border(image: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """裁掉四边纯黑边框，返回 (裁剪后的图, (left, top, right, bottom))。
+
+    黑边本身不产生观测，但**黑边与内容交界的那几列 pair** 会拿到量级很大、方向固定的假差分，
+    按 tile 周期性反复砸在同样的 bit 上，折起来就是十几个固定的错 bit，超过 BCH(255,207,t=6)
+    的纠错能力。实测一张企业微信转发图：不裁失败，裁完 correctedBits=0。
+
+    保守起见只在"这条边纯黑 + 紧挨着它就有明显更亮的内容"时才裁；深色 UI 的黑背景、或者
+    跑满上限的长条，都当作内容不动（与 Swift 端 `trimmingUniformDarkBorder` 逐条同义）。
+    """
+    height, width = image.shape[:2]
+    if height == 0 or width == 0:
+        return image, (0, 0, 0, 0)
+    luma = feature_plane(image, "luma").reshape(height, width)
+    dark = luma <= BORDER_DARK_LUMA
+    bright = luma >= BORDER_PROBE_LUMA
+    column_dark, column_bright = dark.sum(axis=0), bright.sum(axis=0)
+    row_dark, row_bright = dark.sum(axis=1), bright.sum(axis=1)
+
+    def run(counts: np.ndarray, bright_counts: np.ndarray, span: int, from_start: bool) -> int:
+        extent = int(counts.size)
+        cap = min(extent, max(1, int(extent * BORDER_MAX_TRIM_FRACTION)))
+        minimum = span * BORDER_MIN_DARK_COVERAGE
+        count = 0
+        while count < cap:
+            index = count if from_start else extent - 1 - count
+            if counts[index] < minimum:
+                break
+            count += 1
+        # 全黑一直顶到上限 → 深色内容，不是黑边
+        if count == 0 or count >= cap:
+            return 0
+        probe = 0
+        pixels = 0
+        for step in range(BORDER_PROBE_DEPTH):
+            index = count + step if from_start else extent - 1 - count - step
+            if index < count or index >= extent - count:
+                continue
+            probe += int(bright_counts[index])
+            pixels += span
+        if pixels == 0 or probe / pixels < BORDER_MIN_PROBE_COVERAGE:
+            return 0
+        return count
+
+    left = run(column_dark, column_bright, height, True)
+    top = run(row_dark, row_bright, width, True)
+    right = run(column_dark, column_bright, height, False)
+    bottom = run(row_dark, row_bright, width, False)
+    if left == top == right == bottom == 0:
+        return image, (0, 0, 0, 0)
+    return image[top:height - bottom, left:width - right], (left, top, right, bottom)
+
+
 def load_image(path: str) -> np.ndarray:
     try:
         with Image.open(path) as handle:
@@ -1821,7 +1932,7 @@ def print_layout(result: Decoded, key: bytes | None, pages: list[str] | None) ->
         print(build_clock_line(fields.build))
 
 
-def print_v52_result(result: V52Decoded, layout: bool) -> bool:
+def print_v52_result(result: V52Decoded, layout: bool, trim_field: str = "") -> bool:
     """Print a successful v5.2 result; return false for ambiguity/failure."""
     if result.ambiguous:
         warn("v5.2 找到多个不同的 CRC-valid payload，拒绝按首个结果裁决 "
@@ -1844,7 +1955,7 @@ def print_v52_result(result: V52Decoded, layout: bool) -> bool:
         f"softRecovery={'true' if result.soft_recovery_used else 'false'}  "
         f"pilotScore={result.pilot_score:.3f}  candidateCount={result.candidate_count}  "
         f"minObs={result.min_observations}  avgObs={result.average_observations:.1f}  "
-        f"|z|中位={result.median_abs_z:.1f}  {verdict}"
+        f"|z|中位={result.median_abs_z:.1f}  {verdict}{trim_field}"
     )
     if not result.has_sufficient_evidence:
         message = (f"每 bit 仅 {result.average_observations:.1f} 次观测（最少 {result.min_observations} 次，"
@@ -1917,6 +2028,17 @@ def main(argv: list[str]) -> int:
     image = load_image(options["path"])
     key = options["key"]
 
+    # 黑边（IM 转发 / 图片查看器套的纯黑边框）先在自动路径上裁掉；显式 --offset 的调用方
+    # 自己掌握几何，不动他们的图。裁剪后 phase 相对裁剪后的图像。
+    trim = (0, 0, 0, 0)
+    if not options["explicit_offset"]:
+        image, trim = trim_uniform_dark_border(image)
+        if any(trim):
+            warn("检测到黑边，已按内容区解码"
+                 f"（trim=({trim[0]},{trim[1]},{trim[2]},{trim[3]})，"
+                 "phase 相对裁剪后的图像 / black border trimmed")
+    trim_field = f"  trim=({trim[0]},{trim[1]},{trim[2]},{trim[3]})" if any(trim) else ""
+
     if options["protocol"] in ("v5.2", "auto"):
         explicit_v52 = options["protocol"] == "v5.2"
         scales = ([options["scale"]] if options["scale"] is not None
@@ -1928,14 +2050,28 @@ def main(argv: list[str]) -> int:
                 offset_y=options["offset"][1], search_tile=False,
             )
         else:
-            v52_result = v52_decode_best(
-                image, scales=scales,
-                planes=(options["plane"],) if explicit_v52 else ("chroma", "luma"),
-                sync_modes=(options["pilot"],), search_phase=True,
-                search_tile=(options["auto"] or options["auto_offset"]) if explicit_v52 else True,
-            )
+            search_tile = (options["auto"] or options["auto_offset"]) if explicit_v52 else True
+            planes = (options["plane"],) if explicit_v52 else ("chroma", "luma")
+            v52_result = None
+            if options["auto"] and options["scale"] is None:
+                # 粗定位：比例尺先给 1 个平面 + ±10% 的 5 档候选，省掉 21 档粗网格 × 2 平面。
+                hint = estimate_scale_ruler(image, planes=planes)
+                if hint is not None and hint[2] >= SCALE_RULER_MIN_CONFIDENCE:
+                    warn(f"比例尺粗定位：{hint[0]} scale≈{hint[1]:.3f}（置信 {hint[2]:.2f}）"
+                         " → 只在候选附近精搜 / scale ruler hint")
+                    v52_result = v52_decode_best(
+                        image, scales=ruler_candidate_scales(hint[1]), planes=(hint[0],),
+                        sync_modes=(options["pilot"],), search_phase=True, search_tile=search_tile,
+                    )
+                    if v52_result is not None and not v52_result.is_success:
+                        v52_result = None   # ambiguous 不值得信，交给完整网格重搜
+            if v52_result is None:
+                v52_result = v52_decode_best(
+                    image, scales=scales, planes=planes,
+                    sync_modes=(options["pilot"],), search_phase=True, search_tile=search_tile,
+                )
         if v52_result is not None:
-            if print_v52_result(v52_result, options["layout"]):
+            if print_v52_result(v52_result, options["layout"], trim_field):
                 return 0
             fail("v5.2 解码未形成唯一的 BCH + CRC-valid 结果", 1)
         if explicit_v52:
@@ -1980,7 +2116,7 @@ def main(argv: list[str]) -> int:
         f"payload=0x{result.payload_bytes.hex()}  payloadBits={result.payload_bits}  "
         f"平面={result.plane}  相位=({result.offset_x},{result.offset_y})  "
         f"signal={result.signal:.2f}  |z|中位={result.median_abs_z:.1f}  "
-        f"最弱={result.confidence:.1f}  弱bit={weak}/{total}  {verdict}"
+        f"最弱={result.confidence:.1f}  弱bit={weak}/{total}  {verdict}{trim_field}"
     )
     if options["layout"]:
         if insufficient:

@@ -211,6 +211,26 @@ exclusive with `--offset` and overlaps `--auto` (passing both exits with an erro
 `--key` it can only rank by median `|z|` and **does not guarantee a correct payload** — read the
 weak-bit count.
 
+**Black borders are trimmed automatically**: IM clients, image viewers, and CleanShot wrap screenshots
+in a solid black frame (sometimes with rounded corners). The frame itself contributes no observations,
+but the pair columns straddling the frame/content edge pick up a huge, fixed-sign false difference that
+lands on the same bits every tile period — that exceeds the BCH t=6 budget and the whole image fails to
+decode. Measured on a WeChat Work forwarded v5.2 screenshot: fails untrimmed, `correctedBits=0` once
+trimmed. Automatic paths (`--auto`, `--auto-offset`, default phase) therefore trim solid black borders
+first and append `trim=(left,top,right,bottom)` to the result line; **`phase` is relative to the trimmed
+image**. An explicit `--offset` means the caller owns the geometry and nothing is trimmed. Dark UI
+backgrounds are not mistaken for borders: a black band that reaches the 25% cap aborts trimming
+entirely, and the strip just inside the border must be followed by clearly brighter content
+(thresholds: `RGBAImage.BorderTrimHeuristic`).
+
+![black border trimming](docs/images/black-border-trim.png)
+
+The figure above is a **synthetic illustration** (not a real screenshot): a 9/14 px solid black frame
+around a synthetic v5.2 image, with the automatically detected content area outlined in red. Untrimmed,
+the false differences at the frame/content boundary land on the same bits every tile period until the
+BCH budget is exhausted and the whole image fails; trimmed, the same image reports `correctedBits=0`
+(a real WeChat Work forwarded screenshot goes from failing to `page=ccnewcha`).
+
 Tile shifts must be searched because cropping off a non-multiple of 256 pixels moves the tile
 origin relative to the image; every local pair index shifts, which shows up as a **rotation** of
 the payload (cropping 137 px → 32 bits of rotation). A phase search only fixes block alignment
@@ -452,9 +472,24 @@ conditions are recorded separately.
 #### 5. Fractional rectangle averaging and uniform-scale search
 
 **Principle.** The decoder builds an integral image for each feature plane and uses rectangle means with
-fractional boundaries to model a resized block, instead of rounding the scale to an integer block. `decodeBest`
-first ranks a 0.50...1.50 coarse grid at 0.05 steps, then refines local winners while rechecking block phase
-and tile-index shifts, and only then enters BCH/CRC decoding.
+fractional boundaries to model a resized block, instead of rounding the scale to an integer block.
+
+Before the grid search, a **scale ruler** runs first: the watermark alternates `[block, !block]` pairs
+along x, so its horizontal autocorrelation is most negative at `lag = block` and most positive at
+`lag = 2*block`. A joint "valley + doubled peak" objective interpolated on a fine grid reads the block
+length in 10–50 ms (`scale = block / 8`), and only five candidates within ±10% of that ratio are searched
+instead of 21 scales × 2 planes. Confidence is the valley depth (measured 0.30–0.74 on watermarked
+images, ≈0.00 on flat or noisy images without a watermark); a weak hint or a failed fast path **falls
+back to the full grid**, so behaviour matches the previous release. Measured accuracy: exact at 0.50 /
+0.75 / 1.00 / 1.50, within 1.3% at 1.173 / 1.30, 4.5% at 0.837, 7.6% on a WeChat Work forwarded
+screenshot — hence the ±10% candidates plus local refinement (`estimatedScale` is the refined value).
+
+The coarse stage also ranks **scales**, not individual contexts: one scale has hundreds of phases, and
+ranking contexts lets them fill the top-16, which kept unlisted ratios (such as 1.173) out of the
+refinement stage. That was the "`--scale 1.173` decodes but the default grid does not" bug; all seven
+ratios 0.50...1.50 now decode from the CLI. The fallback grid is still a continuous 0.50...1.50 sweep at
+0.05 steps, which then refines local winners while rechecking block phase and tile-index shifts, and only
+then enters BCH/CRC decoding.
 
 **Strengths.** The scale need not be a hard-coded whitelist: 0.50, 0.837, 1.173, and 1.50, plus small arbitrary
 crop offsets, were recovered under the experiment conditions. Cheap statistics filter geometry contexts before
@@ -565,7 +600,10 @@ synthetic grey background, chroma, alpha=8, tiled PNG; timing includes the state
 | pilot | `.pn` / `.separated` under the same conditions | payload equal; both pilot scores about 0.995 (diagnostic only) |
 | resize | nearest-generated 0.50 / 0.837 / 1.173 / 1.50 images with scale supplied | 4/4 payloads equal |
 | unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | release about 0.66 s (debug 11.7 s), estimated scale 0.8358, payload equal |
-| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s in release, payload equal |
+| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s → **1.22 s** with the scale ruler, payload equal |
+| unlisted ratios | 0.50 / 0.75 / 0.837 / 1.0 / 1.173 / 1.3 / 1.5, `--protocol v5.2 --auto` | 7/7 payloads equal, `estimatedScale` within 0.4% (ruler hint within 8%) |
+| forwarded resized shot | WeChat Work forwarded 0.8134-scale image plus black border | decoded in 1.35 s, `minObs` 13 → 40 |
+| v4 image via `--protocol auto` | 1179×2556 | 7.7 s → 8.9 s (fixed cost of the ruler plus the 5-scale fast path, then falls back to v4) |
 | evidence floor | 320×320 small image (`minObs=2`/bit) | `TOO_SMALL`, `--layout` refused (exit 1 in both implementations) |
 | crop | 9 px left and 13 px top, unknown phase/tile shift | payload equal, one candidate |
 | negative | 640×900 plain image | no CRC-valid candidate |
@@ -594,8 +632,197 @@ Observation counts are geometry, not amplitude (all six pages report `minObs=76`
 depends on the page content and the payload pattern of that run, so the photo page landed anywhere
 between 14 and 42 across four runs — treat the column as a margin indicator, not a monotone curve.
 
+The same text-free 240×120 patch of the flat gradient page, magnified 3× (nearest) at delta = 2 / 4 / 8:
+
+![delta 2/4/8 comparison](docs/images/visibility-delta.png)
+
+![delta=4 at 1:1](docs/images/visibility-delta4-1x.png)
+
+- The comparison above is **magnified** so the blocks can be counted; the real impression is the
+  [1:1 crop](docs/images/visibility-delta4-1x.png) — on a simulator it reads as very faint colour noise
+  and the 8 px block pairs are hard to make out without zooming.
+- At 3× you can count the 8 px blocks, the 16 px pair period, and the polarity flip at each 256 px tile
+  boundary.
+- The chroma axis swings by `delta` (the ΔB column); the luma axis is matched to ≤0.8/255 — **"invisible"
+  refers to the luma axis only**.
+
+This one is delta=4 with chroma **artificially amplified 8×**, purely to expose the geometry —
+do **not** use it to judge visibility:
+
+![delta=4 with chroma amplified](docs/images/visibility-delta4-chroma-x8.png)
+
+All of these are **simulator** screenshots (iPhone 16 / iOS 18.6, `BW_PAGE=plain`, `chroma`,
+`sync=none`). Simulator colour mapping is not a device: the same ΔB=4/255 looks different on P3 / OLED,
+so the visibility decision (delta 4 or 2) still has to come from the real-device + darkest-page pass in
+the integration skill.
+
 v4 for comparison (same page, same delta 8, same palette: ΔB=−8/255): v4 spends twice the observations
 per bit, so its six layouts still report `mac=OK(验签)` at delta=6, while delta=4 pushes the dark/mixed
 pages to 19/512 weak bits. That is why **v5.2 defaults to 4** while **v4 keeps its historical default
 8** (use 6 when you want a fainter grid, after re-checking on a device). Any delta change needs the
 device + darkest-page visibility pass from the integration skill.
+
+
+## Measured results and limits
+
+### Unit tests
+
+`swift test` covers 65 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
+(vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
+watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
+chroma textures not silently decoding wrong, `--auto` phase / plane / bit-count detection, the
+256-bit layout round-trip with all three check tiers (HMAC / public self-check / unsigned),
+near-copy aliases being rejected by the self-check but not by the structural check, block parity
+restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
+PageRegistry / PageNameCodec.
+
+`python3 tools/test_bwdecode.py` adds 158 checks and cross-checks against the Swift binary on the
+same PNG.
+
+### Per-page simulator measurements
+
+Six very different layouts in `Demo/`, iPhone 16 simulator (iOS 18.6, 1179×2556), layout v4 payload
+(uid `0xDEADBEEF` + time + build `202609161722` + 15-character code + note), chroma at delta 8
+(default), no key (the check field holds the public self-check value):
+
+| Page | Content | signal | median \|z\| | weakest | weak bits | Verdict | Check |
+|---|---|---|---|---|---|---|---|
+| plain | near-flat gradient | 9.00 | 120.3 | 4.1 | 0/512 | OK | self-check |
+| white | white + a bit of bubble text | 9.00 | 113.8 | 4.7 | 0/512 | OK | self-check |
+| text | text-dense list | 9.00 | 120.6 | 2.9 | 1/512 | WEAK | self-check |
+| photo | photo grid (synthetic noise + hard edges) | 9.10 | 35.0 | 6.6 | 0/512 | OK | self-check |
+| dark | dark background + dark cards | 9.12 | 113.8 | 1.9 | 4/512 | WEAK | self-check |
+| mixed | white over black + text + a photo | 9.21 | 54.9 | 2.1 | 4/512 | WEAK | self-check |
+
+Compared with the 256-bit layout on the same pages: median `|z|` 161.0 → 120.3, weakest 6.7 → 2.9 —
+**the margin is roughly halved** (twice the payload = half the observations per bit). The WEAK
+verdicts above merely mean "not zero weak bits"; they are far from the 512/8 = 64 threshold, and
+`mac=OK(自检,未验签)` already proves the payload is correct. **At 512 bit, judge by the check value;
+weak bits only tell you about margin.**
+
+Harshest realistic content (springboard photo wallpaper + icons, composited offline on real pixels):
+
+| delta | observations/bit | decoded | median \|z\| | weak bits |
+|---|---|---|---|---|
+| 8 (default) | 45.5 | OK | 9.4 | 32/512 |
+| 10 | 45.5 | OK | 14.9 | 22/512 |
+| 12 | 45.5 | OK | 19.3 | 9/512 |
+
+**luma is unusable at 512 bit** (at delta 12: plain 10/512 WEAK, text 139/512 NO, photo 103/512 NO;
+lower delta is worse). luma needs a smaller payload, and re-measurement with `Demo/sweep.sh` first.
+
+> A large `signal` means large content noise and says nothing about decodability (the luma text
+> page scores 20 yet is the worst). What decides is `|z|` and the check value.
+
+Verdicts versus the check value: when the verdict says `NO` / `WEAK` but `mac=OK(…)`, **the check
+value wins** — weak bits only mean little margin, not a wrong payload. Conversely a payload that
+carries a check value and fails it (`mac=BAD`) must be treated as a failure; do not read the
+numbers anyway.
+
+The `mac` field is reported in tiers (end of the second `--layout` line):
+
+| Output | Meaning |
+|---|---|
+| `mac=OK(验签)` | HMAC verified — account/time trustworthy and unforged |
+| `mac=OK(自检,未验签)` | public self-check passed — proves "decoded correctly", **not** "not forged" |
+| `mac=未签名(字段自洽,退结构自检)` | payload carries no check value; crop conclusions unreliable |
+| `mac=未校验(需要 --key)` | HMAC-signed payload but no key given — such a payload **cannot** be searched for crop/rotation (no arbiter); get the key, or have the sender embed the public self-check value |
+| `mac=BAD(密钥不符或载荷被改)` | key given and neither check matches |
+
+When validating an integration with different layouts, run `Demo/sweep.sh` and re-measure instead
+of copying these numbers:
+
+```bash
+cd Demo && ./sweep.sh                          # chroma sweep over all pages (default)
+cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin at a given delta
+cd Demo && ./sweep.sh "" "" chroma v52         # sweep the v5.2 protocol (BW_PROTOCOL=v52 + --protocol v5.2 --auto)
+```
+
+### Known limits
+
+- **Black borders are trimmed first**: a solid black frame added by IM clients or image viewers is removed
+  before decoding, and the result line gains `trim=(left,top,right,bottom)` with `phase` relative to the
+  trimmed image. An untrimmed frame makes the boundary columns carry a fixed-sign false difference that
+  lands on the same bits every tile period; past the BCH t=6 budget the whole image fails (measured on a
+  WeChat Work forwarded v5.2 screenshot: fails untrimmed, `correctedBits=0` once trimmed). An explicit
+  `--offset` disables trimming, and a dark page's own black margins (a band reaching the 25% cap) are
+  never mistaken for a frame.
+
+- **Small crops cannot be decoded, and the decoder refuses to answer**: observations per bit =
+  available pairs / payloadBits. Measured (real pixels, chroma, 512 bit, full width 1179): at 4.4
+  observations per bit there are 16/512 weak bits and the self-check fails; at 5.3 it passes — so the
+  floor is **5 observations per bit**, about **2700 pairs** (≈300 px tall at full width, or a full
+  1179×2556 screen). Below that the decoder prints `TOO_SMALL(...)` and **refuses to interpret fields
+  with --layout** (degrading to "looks fine but is garbage" is not allowed) — a 482×440 crop measures
+  1.5–3.2 observations per bit and is always refused.
+- **v5.2 uses the same bar, with no exception**: the 256-bit codeword (two opposite-polarity copies per
+  tile, folded back onto the codeword bits) measured **2 observations/bit** on a 320×320 image and
+  **90.9 average / 76 minimum** on a real 1179×2556 simulator screenshot; the floor is again
+  **5 observations per bit**, about **1280 pairs** (≈150 px tall at full width). CRC24 is an integrity
+  self-check, not a signature, so v5.2 has **no** "payload carries a check value, so observations do not
+  matter" exception: below the floor it prints `TOO_SMALL(...)` and refuses `--layout` (exit 1).
+- **layout v3 (256 bit / 32 bytes) is deprecated**: field boundaries changed, so historical v3
+  screenshots no longer decode — an explicit breaking change. To read older images, use the decoder
+  from the 1.0.0 tag.
+
+- **Chroma adversarial samples**: a scene whose chroma structure happens to sit at the 8 px scale
+  degrades. `testChromaNeverSilentlyWrongOnAdversarialColorTexture` holds the line — such cases
+  must fail to decode or report low confidence; silently returning a wrong payload is not allowed.
+- **Resizing breaks v4**: a resized v4 screenshot (chat app forwarding, any resize) changes both the
+  block size and the tiling period, so nothing decodes. For a uniform resize, try v5.2 with `--scale`
+  or `--protocol v5.2 --auto`; that path does not cover unknown messenger recompression.
+- **Photographing the screen does not work**: moiré and geometric distortion wreck the block grid;
+  that path needs a sync template plus deep learning and is out of scope here.
+- **Cropping does work**: `--auto` covers vertical and horizontal crops (including half-pair and
+  odd-block offsets). The arbiter is the check value: pass `--key` for a server HMAC, or rely on
+  the payload's public self-check value. With neither (`mac` all zeros) it falls back to the
+  structural check — measured 19/20 on the 20-case real-pixel sweep, and the one miss looks like a
+  plausible answer.
+
+## Simulator smoke test
+
+```bash
+cd Demo && xcodegen generate
+xcodebuild -project Demo.xcodeproj -scheme Demo \
+  -destination 'id=<simulator UDID>' -derivedDataPath /tmp/bwdd build
+xcrun simctl install booted /tmp/bwdd/Build/Products/Debug-iphonesimulator/Demo.app
+xcrun simctl launch booted com.zylcold.blindwatermark.demo
+xcrun simctl io booted screenshot /tmp/shot.png
+.build/release/bwdecode /tmp/shot.png
+```
+
+Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun simctl launch`):
+`SIMCTL_CHILD_BW_PAYLOAD=0x1234 SIMCTL_CHILD_BW_DELTA=8 SIMCTL_CHILD_BW_PLANE=chroma`.
+
+## CI
+
+`.github/workflows/ci.yml` runs four things on every PR:
+
+1. `swift build` (all targets compile)
+2. `swift test` (65 core test cases)
+3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
+   `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
+   `swift test` cannot reach on macOS.
+4. `python3 tools/test_bwdecode.py`: Python decoder self-check (v4/v5.2 synthetic round trip,
+   cropping, resizing, tamper detection, page codes, borders, scale ruler; 158 checks) cross-checked against the Swift
+   `bwdecode` on the same PNG.
+
+Reproduce locally:
+
+```bash
+swift build && swift test
+python3 tools/test_bwdecode.py
+cd Demo && xcodegen generate && xcodebuild -project Demo.xcodeproj -scheme Demo \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/bwdd CODE_SIGNING_ALLOWED=NO build
+```
+
+## Compliance
+
+The watermark carries device and time information, which is personal data. Privacy policies must
+state its purpose and scope, and it must not be used for tracking beyond that purpose. Being
+technically possible is not the same as being lawful.
+
+## License
+
+MIT
