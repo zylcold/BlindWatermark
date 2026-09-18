@@ -6,8 +6,9 @@ description: 在 iOS App 里接入屏上盲水印（BlindWatermark）：把肉�
 
 # 盲水印接入（App 侧）
 
-把 BlindWatermark（`zylcold/BlindWatermark`）装进 App：整个界面常驻一层肉眼不可见的色度扰动，
-截图必然被带上，事后由解码端反查出**设备 / 时间 / 构建号 / 页面**。
+把 BlindWatermark（`zylcold/BlindWatermark`）装进 App：v4 默认在整个界面常驻一层色度扰动，
+截图会带上它，事后由解码端反查出**设备 / 时间 / 构建号 / 页面**。v5.2 是显式 opt-in 的紧凑路径，
+默认 `.none` 仍以色度数据为主；pilot 实验档会留下亮度残差，不能套用 v4 的“肉眼不可见”结论。
 
 **本 skill 只管接入。** 解析截图、判读校验值、排查解不出，看
 [`blind-watermark`](../blind-watermark/SKILL.md) —— 它的「容量与布局」一节是字段契约，
@@ -21,7 +22,7 @@ description: 在 iOS App 里接入屏上盲水印（BlindWatermark）：把肉�
 import BlindWatermark
 
 // 装水印（服务端下发并签名的载荷最可靠）
-Watermark.install(payload: serverIssuedPayload)
+Watermark.install(payload: serverIssuedPayload) // v4 默认
 
 // 换页时更新页面短码 —— 相位不变，解码端无感，微秒级
 Watermark.update(payload: WatermarkPayload(
@@ -44,6 +45,69 @@ Watermark.install(payload: WatermarkPayload.selfChecked(
 模块名与 SPM 一致）。细节见 README「接入」。
 
 ## 二、载荷怎么造
+
+本 skill 默认描述的是 v4。若要启用紧凑协议，必须显式选 v5.2；不要把两套载荷的字节直接互换。
+
+### v5.2 紧凑接入（显式 opt-in）
+
+```swift
+let compact = WatermarkPayloadV52(
+    uid: uid,
+    timestamp: UInt64(Date().timeIntervalSince1970),
+    buildTime: UInt64(Date().timeIntervalSince1970),
+    pageClassName: type(of: self).description(),
+    app: 42,
+    note: "hotfix"
+)!
+Watermark.installV52(payload: compact, delta: 4, plane: .chroma)   // v5.2 默认 delta 就是 4
+// 换页时：Watermark.updateV52(payload: nextCompact)
+```
+
+v5.2 信息字段为 207 bit，固定顺序是 `profile(4)`、`uid(32)`、时间秒偏移(31)、构建分钟偏移(24)、
+8 字符 base37 `page(42)`、`app(14)`、6 字符 base37 `note(32)`、CRC24(24) 与 reserved(4)。
+它编码为 BCH(255,207,t=6) 加一位整体偶校验；每个 256 px tile 放两份相反业务极性的 256 bit 码字。
+CRC 只做完整性检查，不能代替服务端签名或证明 uid 未被伪造。`page` 沿用 `PageNameCodec` 归一化后取
+前 8 字符，`note` 只接受 `[a-z0-9_]` 且最多 6 字符，结尾 `_` 是填充。
+
+**v5.2 默认 `delta: 4`**（v4 仍是 8）。原因：可见性只有亮度轴被陪色匹配掉，**色度轴极差就等于
+`delta`**；v5.2 每个码字 bit 有两份反极性副本，观测余量是 v4 的两倍，所以能靠减半 delta 换来减半的
+可见色差。模拟器实测（iPhone 16 / iOS 18.6，1179×2556，六版式）：
+
+| delta | 色差（ΔR/ΔG, ΔB） | 亮度 ΔLuma | 六版式解码 | 最差页 \|z\| 中位 |
+|---|---|---|---|---|
+| 8 | +1, −8/255 | 0.35/255 | 6/6，`correctedBits=0` | 42 |
+| 6 | +1, −6/255 | 0.50/255 | 6/6，`correctedBits=0` | 28 |
+| **4（默认）** | **+1, −4/255** | **0.64/255** | **6/6，`correctedBits=0`** | **14** |
+| 2 | +1, −2/255 | 0.78/255 | 6/6，`correctedBits=0` | 36 |
+
+（`|z|` 中位受页面内容与本次载荷图案影响，photo 页四次运行落在 14~42，当余量参考而不是曲线看。）
+v4 用同一套配色，但每 bit 观测只有一半：实测 delta=6 六版式仍全部 `mac=OK(验签)`，delta=4 时
+dark/mixed 涨到 19/512 弱 bit。**v4 要更淡就用 6 并先在真机复测**；v5.2 用 4。
+
+v5.2 默认 `sync: .none`。`.pn` / `.separated` 是实验导频档：当前实现为恒定 alpha 的单层 RGBA tile
+加入公共亮度方向调制，会留下 luma 残差，不能宣传为不可见，也不能跳过 P3/sRGB/OLED 的人工验收。
+导频只作用于 `plane: .chroma`：luma 平面把亮度通道全给数据用，此时不写导频、`pilotScore` 无意义
+（解析端 CLI 会打警告）。
+数据与导频必须一起由 `V52Codec.makeTile` 生成，`delta` 是预乘 alpha 源层幅度，不是简单的 chroma 加法。
+
+v5.2 不走 `Watermark.payloadProvider`（那是零接入 v4 默认载荷的入口）：载荷由 `installV52` 给出，
+时间戳在 install 时就固定了；需要新的时间戳就自己再调一次 `updateV52`（例如回前台或换页时）。
+
+解析端显式使用：
+
+```bash
+swift build -c release
+.build/release/bwdecode shot-v52.png --protocol v5.2 --layout --scale 0.837
+# 裁剪 / 比例未知：
+.build/release/bwdecode shot-v52.png --protocol v5.2 --auto --layout
+```
+
+v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 和 `--dump-codes`；它没有 HMAC，也不使用 v4 的
+15 字符页面注册表，`--offset` 也不接受负值（相位由解码器自己搜索）。自动缩放只在 0.50...1.50 的
+粗网格上启动，再用 fractional rectangle averaging
+局部精搜；只保证等比缩放和裁剪，不覆盖旋转、透视、拍屏或聊天软件二次压缩。`candidateCount` 大于 1
+且输出 `ambiguous` 时必须停止解读，保留原图并交由上游处理。**观测证据看第一行的 `minObs`**：低于 5 次/bit
+时解码器输出 `TOO_SMALL(...)` 并拒绝 `--layout`（验收时遇到这种情况要回到更完整的截图重跑，而不是把字段当结论）。
 
 **校验值有两档，都在同一个字段里**：
 
@@ -92,7 +156,7 @@ Watermark.install(payload: WatermarkPayload.selfChecked(
 库只在 App 回前台（`didBecomeActive`）重画一次图案，够覆盖时间戳变化。
 **换页必须显式调 `Watermark.update(payload:)`**，否则页面短码会停在旧值 —— 这是最常见的接入事故。
 
-## 三、参数与可见性
+## 三、v4 参数与可见性
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -100,6 +164,10 @@ Watermark.install(payload: WatermarkPayload.selfChecked(
 | `delta`（代码里叫 `alpha`） | 8 | 扰动幅度。**下限 2**；解码端不需要知道这个值，但幅度决定余量 |
 | `payloadBits` | `payload.count × 8` | v4 载荷固定 512，解码端必须一致 |
 | `windowLevel` | `.alert + 1` | 盖在系统弹窗之上；调低就截不到弹窗场景 |
+
+v5.2 不使用 `payloadBits` 参数：信息字段固定 207 bit，物理码字固定 256 bit；由
+`WatermarkPayloadV52` 和 `V52Codec` 负责布局。`delta` 仍是 alpha，建议先用 `.chroma`；改变 plane、
+alpha 或 sync 后必须重新跑合成、真机和人工可见性验收。
 
 **为什么默认 delta 是 8**：一对色是 `(0,0,a)` 与 `(p,p,0)`，`p = round(0.114a/0.886)`。
 a=8 时 p 正好取整到 1，两条色的亮度几乎完全相等 —— 实测水印自己造成的亮度网格只有
@@ -113,7 +181,12 @@ a=8 时 p 正好取整到 1，两条色的亮度几乎完全相等 —— 实测
 | 12 | 2 | 0.404 |
 | luma 12 | — | 12.000（可见棋盘格） |
 
-**所以"太明显"时不要抬 delta** —— 那是可见性上最差的方向。余量不够的正确解法是把载荷做小
+注意上表量的是**亮度轴**。色度轴的极差就是 `delta` 本身（a=8 → 8/255，约 3% 满量程），以 2.67pt
+的棋盘格铺满整屏，所以大块纯色 / 渐变页上能看见淡蓝或淡粉的格子 —— 这就是「感觉还是能看到水印」的
+来源，跟协议（v4/v5.2）无关，只跟 `delta` 有关。
+
+**所以"太明显"时不要抬 delta** —— 那是可见性上最差的方向；要更淡就**减 delta**（见上面的实测表），
+并重新跑真机 + 最暗页面的可见性验收。余量不够的正确解法是把载荷做小
 （每 bit 观测数 = 图像面积 / pair 面积 / payloadBits，翻倍载荷就减半余量），或者接受解码端的
 `WEAK` 判定（校验值仍能确认对错）。
 
@@ -124,6 +197,7 @@ a=8 时 p 正好取整到 1，两条色的亮度几乎完全相等 —— 实测
 ```bash
 cd Demo && ./sweep.sh "<模拟器UDID>"        # 逐页扫，默认 chroma
 cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
+cd Demo && ./sweep.sh "" "" chroma v52      # v5.2 逐页扫（第 4 个参数选协议，默认 v4）
 ```
 
 换成自己的版式后**必须重测，别照抄 README 的数字**。验收清单：
@@ -137,7 +211,13 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
    `bwdecode shot.png --auto --layout --pages pages.json`，**不带 `--key`**），
    必须能读出 uid / build / note，并且 `mac` 不是 `未签名`/`未校验` ——
    这两档意味着裁过的图将来解不出来
-7. 截图通道确认：解析依赖**设备像素原图**。图片消息通道会重编码/缩放（企业微信 `_HD/` 里存的是
+7. 若接入的是 v5.2，改跑
+   `bwdecode shot-v52.png --protocol v5.2 --auto --layout`，确认 `crcStatus=OK(完整性自检,未验签)`、
+   `candidateCount=1` 且 `minObs ≥ 5`，并把 `scale` / `phase` / `correctedBits` / `minObs` 记录到
+   验收单；CRC 通过只证明完整性与“解对了”，**不是防伪证明**（v5.2 没有 HMAC，输出里不会出现 `mac=`）。
+8. pilot 用 `.pn` / `.separated` 时必须单独记录亮度残差并做 P3/sRGB/OLED 人工检查，不得以导频
+   相关性分数代替可见性结论。
+9. 截图通道确认：解析依赖**设备像素原图**。图片消息通道会重编码/缩放（企业微信 `_HD/` 里存的是
    原始文件，能读；图片消息里的小图、缩略图不行），要求上报走文件/工单附件通道
 
 ## 五、常见坑
@@ -150,6 +230,11 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
 | 弹窗 / 键盘截不到水印 | `windowLevel` 低于那些系统窗口 |
 | 只有一台设备解不出 | displayScale / 色域差异；在真机上复测，别用模拟器结论下判断 |
 | 解码端说"未签名" | 载荷 `mac` 全 0 —— 填公开自检值或走服务端签名 |
+| v5.2 解码成 v4 垃圾字段 | 未显式传 `--protocol v5.2`；迁移期间用 `--protocol auto`，稳定接入后固定协议 |
+| v5.2 报 `ambiguous` | 多个 CRC-valid 候选同时存在；保留原图、不要手选，检查 phase / scale / tile 覆盖 |
+| v5.2 pilot 很容易看见 | `.pn` / `.separated` 是亮度残差实验；先退回 `.none`，再按人工可见性流程复测 |
+| v5.2 报 `TOO_SMALL` | 截图太小 / 被裁得太狠（每 bit 观测 < 5 次）；让上报方发完整原图，不要用解出的字段下结论 |
+| v5.2 的 `pilotScore` 看着像噪声 | 导频只作用于 `plane: .chroma`；luma 平面下这个值是没意义的，改用 chroma 或退回 `.none` |
 
 ## 六、合规
 

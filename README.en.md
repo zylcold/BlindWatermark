@@ -13,7 +13,9 @@ the watermark window end up in the output by construction.
   page code + 22-byte note + 96-bit check value
 - Version: `2.0.0` ([Releases](https://github.com/zylcold/BlindWatermark/releases); SwiftPM uses
   `from: "2.0.0"`, CocoaPods uses `:tag => '2.0.0'`)
-- Invisible: luma residual 0.07/255 (below the visibility threshold), chroma plane only
+- Invisible (**luma axis only**): luma residual 0.07/255 (below the visibility threshold), chroma
+  plane only; the chroma axis swings by `delta` (8/255 at the default 8), so a faint checkerboard is
+  still visible on large flat or gradient areas — lower `delta` to make it fainter (table below)
 - Survives JPEG: 8×8 px blocks encoded in pairs, flat inside each block; decodes at q=0.6
 - Decoding: `swift run bwdecode shot.png --auto --layout --key <hex>`, ~0.1 s for a full-screen shot
 
@@ -48,6 +50,11 @@ not decay with alpha. `p` therefore has to hit that ratio exactly — at `a=6` r
 `p=0`, i.e. pure black paired with pure blue, a 0.68/255 luma step, and the grid becomes visible.
 `a=8, p=1` is the sweet spot with a 0.026/255 residual.
 
+**That 0.026/255 is the luma axis only**: the chroma axis swings by `delta` itself (8/255 at
+a=8, about 3% of full scale) as a 2.67 pt checkerboard across the screen, so on large flat or
+gradient areas the eye does see a faint blue / pink grid. "Invisible" means luma-invisible, not
+chroma-invisible; if the grid bothers you, **lower `delta`** instead of touching the companion `p`.
+
 Measured on an iPhone 16 simulator (plain page, horizontal band with no gradient inside it, so
 what is measured is the watermark alone):
 
@@ -72,7 +79,7 @@ chroma is the default: the 6/255 luma grid of luma mode is visible up close.
   watermark component adds up with the same sign while the picture's own luma gradient cancels.
 - Reading is not taking a sign: signed differences are accumulated and divided by the standard
   error to get a z value. The watermark grows linearly with the number of observations, content
-  noise decays as `1/√n`. One iPhone 16 screenshot gives each bit ~90 observations
+  noise decays as `1/√n`. One iPhone 16 screenshot gives each bit ~45 observations
   (512-bit layout, 23287 pairs in total).
 
 The decode margin was also measured, not guessed (iPhone 16, 3x, luma mode, 32-bit layout):
@@ -122,7 +129,7 @@ The check value lives in the 96-bit `mac` field and has three flavours:
 | Constructed with | Field content | Decoder side |
 |---|---|---|
 | `WatermarkPayload(… key:)` | HMAC-SHA256(first 52 bytes, server key) | with a key → `mac=OK(验签)`; without → `mac=未校验(需要 --key)`, and **crop recovery is unavailable** |
-| `WatermarkPayload.selfChecked(…)` | SHA-256(first 20 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
+| `WatermarkPayload.selfChecked(…)` | SHA-256(first 52 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
 | `mac: []` / all zeros | no check value | `mac=未签名`; cropping search falls back to the structural check |
 
 The self-check catches "alignment was off by a few bits" aliases (measured: zero false positives
@@ -193,12 +200,12 @@ swift build -c release
 .build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
-`--auto` enumerates **2 planes × 64 phases × 512 tile shifts** (bit count defaults to 256 only; a
-different `--bits` is added as a candidate only when passed explicitly) and arbitrates with the
-MAC. Measured at 0.1 s (iPhone 16 screenshot, M1 Pro, release build).
+The historical bare `--auto` keeps the v4 phase/plane search and HMAC/public-self-check arbitration.
+For migration, use the explicit `--protocol auto` spelling to try v5.2 first and then fall back to v4;
+v5.2 uses BCH + CRC candidate collection and never accepts the first CRC-valid candidate.
 
-`--auto-offset` is the narrower version: it assumes `--bits` / `--plane` are already correct
-(256 / chroma by default) and only searches **the block grid phase (mod 8)**. It additionally
+`--auto-offset` is the narrower v4 version: it assumes `--bits` / `--plane` are already correct
+(512 / chroma by default) and only searches **the block grid phase (mod 8)**. It additionally
 enumerates the 512 tile shifts **only when `--key` is given** (MAC arbitration). It is mutually
 exclusive with `--offset` and overlaps `--auto` (passing both exits with an error). Without
 `--key` it can only rank by median `|z|` and **does not guarantee a correct payload** — read the
@@ -339,150 +346,256 @@ timestamp = current Unix seconds, build/pageCode/note empty, and the check field
 self-check value**. The device hash is irreversible; **in production this must be replaced by a
 server-issued, signed payload**.
 
-## Measured results and limits
+## v5.2 compact protocol (explicit opt-in)
 
-### Unit tests
+v5.2 is a separate protocol that coexists with layout v4. The default renderer and historical CLI
+path stay on v4; use `Watermark.installV52` or `bwdecode --protocol v5.2` to opt in. The protocol packs
+207 information bits into BCH(255,207,t6), then adds one even-parity extension bit for a 256-bit
+codeword. Each 256 px tile carries two copies with opposite business polarity. BCH corrects up to six
+bit errors. A bounded Chase pass tries at most two flips among the twelve least reliable bits, collects
+all CRC-valid candidates, deduplicates them, and reports `ambiguous` if different payloads remain.
+CRC is an integrity check, not a signature.
 
-`swift test` covers 48 cases (runs on macOS, no simulator needed): pure white / pure black / mid
-grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
-(vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
-watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
-chroma textures not silently decoding wrong, `--auto` phase / plane / bit-count detection, the
-256-bit layout round-trip with all three check tiers (HMAC / public self-check / unsigned),
-near-copy aliases being rejected by the self-check but not by the structural check, block parity
-restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
-PageRegistry / PageNameCodec.
+### v5.2 scheme breakdown: principles, strengths, and limits
 
-`python3 tools/test_bwdecode.py` adds 74 checks and cross-checks against the Swift binary on the
-same PNG.
+v5.2 is a chain of six layers rather than one “encryption algorithm”: payload packing, error correction,
+spatial coding, synchronization, geometry search, and candidate adjudication. Each layer solves a different
+problem and has its own failure boundary:
 
-### Per-page simulator measurements
-
-Six very different layouts in `Demo/`, iPhone 16 simulator (iOS 18.6, 1179×2556), layout v4 payload
-(uid `0xDEADBEEF` + time + build `202609161722` + 15-character code + note), chroma at delta 8
-(default), no key (the check field holds the public self-check value):
-
-| Page | Content | signal | median \|z\| | weakest | weak bits | Verdict | Check |
-|---|---|---|---|---|---|---|---|
-| plain | near-flat gradient | 9.00 | 120.3 | 4.1 | 0/512 | OK | self-check |
-| white | white + a bit of bubble text | 9.00 | 113.8 | 4.7 | 0/512 | OK | self-check |
-| text | text-dense list | 9.00 | 120.6 | 2.9 | 1/512 | WEAK | self-check |
-| photo | photo grid (synthetic noise + hard edges) | 9.10 | 35.0 | 6.6 | 0/512 | OK | self-check |
-| dark | dark background + dark cards | 9.12 | 113.8 | 1.9 | 4/512 | WEAK | self-check |
-| mixed | white over black + text + a photo | 9.21 | 54.9 | 2.1 | 4/512 | WEAK | self-check |
-
-Compared with the 256-bit layout on the same pages: median `|z|` 161.0 → 120.3, weakest 6.7 → 2.9 —
-**the margin is roughly halved** (twice the payload = half the observations per bit). The WEAK
-verdicts above merely mean "not zero weak bits"; they are far from the 512/8 = 64 threshold, and
-`mac=OK(自检,未验签)` already proves the payload is correct. **At 512 bit, judge by the check value;
-weak bits only tell you about margin.**
-
-Harshest realistic content (springboard photo wallpaper + icons, composited offline on real pixels):
-
-| delta | observations/bit | decoded | median \|z\| | weak bits |
-|---|---|---|---|---|
-| 8 (default) | 45.5 | OK | 9.4 | 32/512 |
-| 10 | 45.5 | OK | 14.9 | 22/512 |
-| 12 | 45.5 | OK | 19.3 | 9/512 |
-
-**luma is unusable at 512 bit** (at delta 12: plain 10/512 WEAK, text 139/512 NO, photo 103/512 NO;
-lower delta is worse). luma needs a smaller payload, and re-measurement with `Demo/sweep.sh` first.
-
-> A large `signal` means large content noise and says nothing about decodability (the luma text
-> page scores 20 yet is the worst). What decides is `|z|` and the check value.
-
-Verdicts versus the check value: when the verdict says `NO` / `WEAK` but `mac=OK(…)`, **the check
-value wins** — weak bits only mean little margin, not a wrong payload. Conversely a payload that
-carries a check value and fails it (`mac=BAD`) must be treated as a failure; do not read the
-numbers anyway.
-
-The `mac` field is reported in tiers (end of the second `--layout` line):
-
-| Output | Meaning |
-|---|---|
-| `mac=OK(验签)` | HMAC verified — account/time trustworthy and unforged |
-| `mac=OK(自检,未验签)` | public self-check passed — proves "decoded correctly", **not** "not forged" |
-| `mac=未签名(字段自洽,退结构自检)` | payload carries no check value; crop conclusions unreliable |
-| `mac=未校验(需要 --key)` | HMAC-signed payload but no key given — such a payload **cannot** be searched for crop/rotation (no arbiter); get the key, or have the sender embed the public self-check value |
-| `mac=BAD(密钥不符或载荷被改)` | key given and neither check matches |
-
-When validating an integration with different layouts, run `Demo/sweep.sh` and re-measure instead
-of copying these numbers:
-
-```bash
-cd Demo && ./sweep.sh                          # chroma sweep over all pages (default)
-cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin at a given delta
+```mermaid
+flowchart LR
+    P["Fixed fields: 207 bits<br/>CRC24 + reserved"] --> E["BCH(255,207)<br/>+ even parity = 256 bits"]
+    E --> T["8×8 blocks / 256×256 tile<br/>512 pairs, two opposite-polarity copies"]
+    T --> S{"sync"}
+    S -->|none| D["chroma/luma pair difference"]
+    S -->|pn / separated| Q["pair difference + PN correlation"]
+    D --> G["fractional averaging<br/>scale / phase / tile-shift search"]
+    Q --> G
+    G --> C["BCH decode + CRC<br/>hard decision, then bounded Chase"]
+    C --> U{"unique payload?"}
+    U -->|yes| O["payload + diagnostics"]
+    U -->|no| A["ambiguous / reject"]
 ```
 
-### Known limits
+#### 1. Compact payload and field constraints
 
-- **Small crops cannot be decoded, and the decoder refuses to answer**: observations per bit =
-  available pairs / payloadBits. Measured (real pixels, chroma, 512 bit, full width 1179): at 4.4
-  observations per bit there are 16/512 weak bits and the self-check fails; at 5.3 it passes — so the
-  floor is **5 observations per bit**, about **2700 pairs** (≈300 px tall at full width, or a full
-  1179×2556 screen). Below that the decoder prints `TOO_SMALL(...)` and **refuses to interpret fields
-  with --layout** (degrading to "looks fine but is garbage" is not allowed) — a 482×440 crop measures
-  1.5–3.2 observations per bit and is always refused.
-- **layout v3 (256 bit / 32 bytes) is deprecated**: field boundaries changed, so historical v3
-  screenshots no longer decode — an explicit breaking change. To read older images, use the decoder
-  from the 1.0.0 tag.
+**Principle.** `uid`, timestamps, page, app id, and a short note are written into fixed-width fields in
+207 bits. Page and note use base37; CRC24 covers the first 179 bits and the final four bits are reserved
+as zero. Every field is little-endian and fixed-width, so Swift and Python can reconcile bit-for-bit without
+sharing an object serialization format.
 
-- **Chroma adversarial samples**: a scene whose chroma structure happens to sit at the 8 px scale
-  degrades. `testChromaNeverSilentlyWrongOnAdversarialColorTexture` holds the line — such cases
-  must fail to decode or report low confidence; silently returning a wrong payload is not allowed.
-- **Resizing breaks it**: a resized screenshot (chat app forwarding, any resize) changes both the
-  block size and the tiling period, so nothing decodes. Only native device-pixel resolution works;
-  ask the user for the **original** image.
-- **Photographing the screen does not work**: moiré and geometric distortion wreck the block grid;
-  that path needs a sync template plus deep learning and is out of scope here.
-- **Cropping does work**: `--auto` covers vertical and horizontal crops (including half-pair and
-  odd-block offsets). The arbiter is the check value: pass `--key` for a server HMAC, or rely on
-  the payload's public self-check value. With neither (`mac` all zeros) it falls back to the
-  structural check — measured 19/20 on the 20-case real-pixel sweep, and the one miss looks like a
-  plausible answer.
+**Strengths.** The 26-byte message becomes one 256-bit physical codeword, so a 256 px tile can carry two
+copies; compared with putting a 512-bit business payload into the same tile, each codeword bit gets more
+observation headroom. The fixed fields, profile, and reserved bits also provide cheap structural filtering:
+bad alignment is usually rejected before it reaches the business layer.
 
-## Simulator smoke test
+**Limits.** This is a capacity optimization, not a general metadata container. Page is limited to eight
+base37 characters, note to six `[a-z0-9_]` characters, and a trailing `_` cannot be distinguished from padding;
+the timestamp and build-time fields also have finite epoch windows. CRC detects accidental corruption but
+does not prove that a server issued the payload; use a signature or HMAC at the business layer for
+authenticity. If arbitrary UTF-8 text is needed, keep it in a server-side index instead of forcing it into v5.2.
 
-```bash
-cd Demo && xcodegen generate
-xcodebuild -project Demo.xcodeproj -scheme Demo \
-  -destination 'id=<simulator UDID>' -derivedDataPath /tmp/bwdd build
-xcrun simctl install booted /tmp/bwdd/Build/Products/Debug-iphonesimulator/Demo.app
-xcrun simctl launch booted com.zylcold.blindwatermark.demo
-xcrun simctl io booted screenshot /tmp/shot.png
-.build/release/bwdecode /tmp/shot.png
+#### 2. BCH(255,207) and the even-parity extension
+
+**Principle.** `V52BCH` performs systematic polynomial division with a fixed GF(256) and generator polynomial,
+producing 48 BCH parity bits. The decoder computes syndromes `S1...S12`, derives an error-locator polynomial
+with Berlekamp–Massey, finds positions with a Chien search, and flips at most six errors. Bit 256 is an
+independent even-parity extension; a final systematic re-encode check rejects a spurious locator.
+
+**Strengths.** The correction rule, bit order, and golden vectors are fixed, and both Swift and Python do it
+without a third-party dependency. Up to six hard-decision errors in one 255-bit codeword have a clear BCH
+guarantee; a flipped extension parity bit can be repaired separately. CRC is checked after BCH, covering both
+channel recovery and field validity.
+
+**Limits.** `t=6` applies to the BCH codeword error model only. Block misalignment, burst errors, clipped colors,
+and more than six errors are outside the guarantee. Chase is a bounded reliability heuristic—at most twelve
+bits and two flips—not an eight-bit (or higher) BCH guarantee, and it costs additional time. Neither BCH nor
+CRC provides confidentiality or authenticity.
+
+#### 3. 8×8 blocks, tiled layout, and opposite-polarity copies
+
+**Principle.** Two adjacent 8×8 blocks form a pair; the sign of their mean difference carries one bit. A
+256×256 px tile has 32×16 = 512 pairs. The first 256 pairs carry the original codeword and the second 256
+pairs carry the opposite business polarity. The decoder uses `copySign` to fold both copies onto one codeword
+index and aggregates observations as z-scores.
+
+**Strengths.** Flat blocks survive light screenshot or JPEG blur better than single-pixel noise. Left-right
+differencing cancels the background term, so white, black, and coloured backgrounds are all usable. The second
+copy gives each v5.2 codeword bit more observations and allows tile-index shifts to recover a cropped phase;
+opposite business polarity also cancels similarly directed content gradients across the two copies.
+
+**Limits.** The 256 px tile and 8 px block are fixed geometry. Small images, non-integer scaling, or heavy
+resampling reduce observations; tile-shift search compensates indexing and does not mean that image rotation
+is supported. The duplicate copy consumes tile space rather than increasing business capacity, and its errors
+are not guaranteed to be independent: occlusion, clipping, or a gradient can affect both copies. Without a
+valid CRC/HMAC, a wrong tile shift must be rejected rather than selected because it “looks clean.”
+
+#### 4. `sync=none`, `pn`, and `separated` pilots
+
+**Principle.** `.none` carries only the business difference and is the default baseline. `.pn` adds a
+deterministic PN sequence across all 512 pairs. `.separated` uses the same PN index for the two BCH copies,
+so pilot correlation can add while business data is recovered by opposite-polarity differencing. The current
+implementation writes pilot and data together in a constant-alpha, single-layer RGBA tile and measures
+correlation from luma pair differences.
+
+**Strengths.** A pilot uses no payload bits and can expose phase, scale, and signal-quality diagnostics. When
+gain is equal and both copies survive, `.separated` gives a more stable correlation signal than a single copy.
+It is useful for experiments and tuning without changing the business field protocol.
+
+**Limits.** Adding RGB modulation in the brightness direction leaves measurable luma residual, and pilot
+amplitude (about 1–2 in current settings) consumes alpha headroom, reducing data amplitude. Pilot correlation
+therefore does not establish visual invisibility. Cropping one copy, unequal resampling gain, colour-space
+conversion, JPEG, or camera capture breaks ideal cancellation; `.pn` and `.separated` do not replace manual
+P3, sRGB, and OLED visibility review. Production should stay on `.none` unless residuals and acceptance
+conditions are recorded separately.
+
+#### 5. Fractional rectangle averaging and uniform-scale search
+
+**Principle.** The decoder builds an integral image for each feature plane and uses rectangle means with
+fractional boundaries to model a resized block, instead of rounding the scale to an integer block. `decodeBest`
+first ranks a 0.50...1.50 coarse grid at 0.05 steps, then refines local winners while rechecking block phase
+and tile-index shifts, and only then enters BCH/CRC decoding.
+
+**Strengths.** The scale need not be a hard-coded whitelist: 0.50, 0.837, 1.173, and 1.50, plus small arbitrary
+crop offsets, were recovered under the experiment conditions. Cheap statistics filter geometry contexts before
+the bounded 512 tile shifts and Chase budget are spent.
+
+**Limits.** This is a uniform-scale model; it says nothing about rotation, perspective, camera capture, local
+crop, or messenger recompression. Resampling kernels, JPEG 4:2:0, P3/sRGB, and device pipelines need separate
+measurements. Wider scale ranges and candidate budgets cost time and memory. Current phase search covers integer
+pixel positions; subpixel phase remains a later experiment. `estimatedScale` is the best geometric candidate,
+not proof of a particular resampler.
+
+#### 6. Candidate collection, CRC adjudication, and `ambiguous`
+
+**Principle.** Hard bits come from the signs of the z-scores. The decoder tries BCH and payload CRC for each
+tile index; if hard decisions fail, it enumerates up to two flips among the twelve least reliable bits. Every
+CRC-valid result is collected, deduplicated by payload bytes, and represented by its highest-scoring observation.
+If more than one distinct payload remains, the result is `ambiguous` rather than the first passing candidate.
+
+**Strengths.** This separates “found a self-consistent result” from “proved the result is unique,” preventing a
+wrong phase or a plain image from silently winning by chance. `candidateCount`, `correctedBits`,
+`softRecovery`, `scale`, and `phase` also show how much recovery was needed.
+
+**Limits.** CRC false positives are unlikely but not mathematically impossible, and z-scores are not calibrated
+error probabilities. Rejecting an ambiguous set is correct but lowers recall. Scores are for ranking, not for
+confidence or signature verification. For an answer to “who issued this watermark,” the payload needs a
+server-verifiable signature reference or a server-side check of uid, time, and page.
+
+For deployment, keep existing v4 screenshots on the default v4 path. Use v5.2 `.none` for new integrations that
+need a compact payload and uniform-resize tolerance. Run `.pn` / `.separated` separately when measuring sync
+quality and record their residuals. Use `--protocol auto` only for migration-time mixed detection; the historical
+bare `--auto` remains v4 search and is not a cross-protocol probe.
+
+The 207-bit field order is (low bit first):
+
+| Field | Bits | Rule |
+| --- | ---: | --- |
+| profile | 4 | fixed `1`; unknown values are rejected |
+| uid | 32 | `UInt32` |
+| timestamp | 31 | seconds after UTC 2026-01-01 |
+| buildTime | 24 | minutes after UTC 2026-01-01 |
+| page | 42 | eight base37 characters |
+| app | 14 | `0...9999` |
+| note | 32 | six base37 characters |
+| CRC24 | 24 | `poly=0x864CFB, init=0xB704CE, refin=false, refout=false, xorout=0`; covers the first 179 bits |
+| reserved | 4 | fixed zero, outside the CRC, non-zero is rejected |
+
+The base37 alphabet is `abcdefghijklmnopqrstuvwxyz0123456789_`; the first character is the most
+significant radix digit. Fixed fields are right-padded with `_`, which is removed on decode, so a literal
+trailing underscore is not representable. Page names use the existing `PageNameCodec` normalization and
+keep eight characters. Notes accept only `[a-z0-9_]` and at most six characters; they are not arbitrary
+UTF-8 text. Golden vectors are kept in `Tests/BlindWatermarkCoreTests/V52Tests.swift`:
+
+```text
+payload = 8167452371682d01a0dd0a50ffa86faf4a0520236ff49078f702
+bch256  = dbf79d8bb6998167452371682d01a0dd0a50ffa86faf4a0520236ff49078f782
 ```
 
-Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun simctl launch`):
-`SIMCTL_CHILD_BW_PAYLOAD=0x1234 SIMCTL_CHILD_BW_DELTA=8 SIMCTL_CHILD_BW_PLANE=chroma`.
+The canonical BCH vector for `message=1` is
+`973cdf85ebc70100000000000000000000000000000000000000000000000080`, using
+`generator=0x1c7eb85df3c97`.
 
-## CI
-
-`.github/workflows/ci.yml` runs four things on every PR:
-
-1. `swift build` (all targets compile)
-2. `swift test` (48 core test cases)
-3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
-   `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
-   `swift test` cannot reach on macOS.
-4. `python3 tools/test_bwdecode.py`: Python decoder self-check (synthetic round trip, cropping,
-   tamper detection, page codes) cross-checked against the Swift `bwdecode` on the same PNG.
-
-Reproduce locally:
-
-```bash
-swift build && swift test
-python3 tools/test_bwdecode.py
-cd Demo && xcodegen generate && xcodebuild -project Demo.xcodeproj -scheme Demo \
-  -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/bwdd CODE_SIGNING_ALLOWED=NO build
+```swift
+let payload = WatermarkPayloadV52(
+    uid: uid, timestamp: UInt64(Date().timeIntervalSince1970),
+    buildTime: UInt64(Date().timeIntervalSince1970),
+    pageClassName: "BHProfileViewController", app: 42, note: "hotfix"
+)!
+Watermark.installV52(payload: payload, delta: 4, plane: .chroma)   // v5.2 defaults to delta 4
+// On navigation: Watermark.updateV52(payload: nextPayload)
 ```
 
-## Compliance
+The first v5.2 CLI line reports `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`,
+`pilotScore`, `candidateCount`, the evidence fields `minObs` / `avgObs` / `|z| median`, and an
+`OK(...)` / `TOO_SMALL(...)` verdict; with `--layout`, the second line adds compact fields and
+`crcStatus=OK(完整性自检,未验签)`. v5.2 has no HMAC: CRC24 is an integrity self-check only, the wording
+never says `mac=`, and the evidence floor has no "signed payload exception" — below 5 observations per
+bit the decoder prints `TOO_SMALL` and **refuses `--layout`** (same bar as v4). The historical bare
+`--auto` keeps its v4 phase/plane search. For migration, opt in to
+mixed detection with `--protocol auto` (v5.2 first, then v4); use `--protocol v4` to force the historical
+protocol. v5.2 rejects v4 `--bits`, `--key`, `--pages`, and `--dump-codes`: it has no HMAC and its
+eight-character compact page code cannot be looked up by the v4 fifteen-character registry; negative
+`--offset` is rejected too (the decoder searches phases 0...block itself, matching the Python mirror).
 
-The watermark carries device and time information, which is personal data. Privacy policies must
-state its purpose and scope, and it must not be used for tracking beyond that purpose. Being
-technically possible is not the same as being lawful.
+`V52SyncMode.pn` and `.separated` are pilot experiment modes; `.none` is the default. The pilot only
+affects `--plane chroma`: the luma plane spends the whole brightness channel on data, so no pilot is
+written there, `pilotScore` is meaningless, and the CLI warns about it. The pilot adds a small
+left/right brightness-direction modulation to a constant-alpha, single-layer tile for correlation
+measurement. The experiment leaves measurable luma residual and has no manual P3/sRGB/OLED visibility
+approval. `payloadProvider` only serves the zero-touch v4 default payload: v5.2 payloads come from
+`installV52` / `updateV52`, their timestamp is frozen at install time, and a fresh timestamp needs
+another `updateV52` call. Chroma data and pilot are generated jointly; delta is a premultiplied-alpha RGBA source-layer
+amplitude, not a simple chroma addition.
 
-## License
+The resize path uses fractional rectangle averaging. Automatic search covers a continuous 0.50...1.50
+coarse grid at 0.05 steps, then refines finalists until the step is no larger than
+`0.5 / max(width,height)`, rechecking the local phase. Ratios such as 0.837 and 1.173 are deliberately
+outside the coarse grid and are experimental coverage, not a guarantee for every image or resampler.
+Only uniform scale is covered; rotation, perspective, camera capture, and messenger recompression remain
+out of scope.
 
-MIT
+Reproducible first-pass measurements (Swift 6.3.3, macOS Command Line Tools, `swift build -c release`
+(the same search is about 20× slower in a debug build, so do not compare debug timings), 640×900
+synthetic grey background, chroma, alpha=8, tiled PNG; timing includes the stated search):
+
+| Path | Condition | Result |
+| --- | --- | --- |
+| baseline | phase=(3,5), `sync=none`, tile-shift search | payload equal, `correctedBits=0`, one candidate |
+| pilot | `.pn` / `.separated` under the same conditions | payload equal; both pilot scores about 0.995 (diagnostic only) |
+| resize | nearest-generated 0.50 / 0.837 / 1.173 / 1.50 images with scale supplied | 4/4 payloads equal |
+| unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | release about 0.66 s (debug 11.7 s), estimated scale 0.8358, payload equal |
+| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s in release, payload equal |
+| evidence floor | 320×320 small image (`minObs=2`/bit) | `TOO_SMALL`, `--layout` refused (exit 1 in both implementations) |
+| crop | 9 px left and 13 px top, unknown phase/tile shift | payload equal, one candidate |
+| negative | 640×900 plain image | no CRC-valid candidate |
+| simulator E2E | 1179×2556 iPhone 16 (iOS 18.6) simulator screenshot, six Demo layouts, `--protocol v5.2 --auto` | 6/6 payloads equal, `correctedBits=0`, `candidateCount=1`, 76 minimum observations/bit |
+| simulator crop | same screenshot minus 24 px left / 137 px top | payload equal, phase=(8,7) |
+| simulator floor | 300×300 crop of the same screenshot | `TOO_SMALL`, `--layout` refused (exit 1) |
+
+These are synthetic PNG protocol/geometry measurements. They do not establish device, JPEG, P3/sRGB,
+OLED-visibility, or messenger acceptance; the Demo and manual visibility pass still require Xcode and a
+device.
+
+#### Visibility versus delta (iPhone 16 simulator / iOS 18.6, 1179×2556, flat gradient page)
+
+Pixels are classified as dark / light from the decoded payload, then the on-screen colour difference
+is measured directly. The chroma amplitude equals `delta`; the luma axis is cancelled by the companion
+colour (`p = round(0.114·delta/0.886)`, which rounds to 1 anywhere in 2...8):
+
+| delta | ΔR / ΔG | ΔB | ΔLuma | v5.2, six layouts | \|z\| median (worst page: photo) |
+| --- | --- | --- | --- | --- | --- |
+| 8 (old default) | +1 | −8/255 | 0.35/255 | 6/6, `correctedBits=0` | 42 |
+| 6 | +1 | −6/255 | 0.50/255 | 6/6, `correctedBits=0` | 28 |
+| **4 (v5.2 default)** | **+1** | **−4/255** | **0.64/255** | **6/6, `correctedBits=0`** | **14** |
+| 2 | +1 | −2/255 | 0.78/255 | 6/6, `correctedBits=0` | 36 |
+
+Observation counts are geometry, not amplitude (all six pages report `minObs=76`); the `|z|` median also
+depends on the page content and the payload pattern of that run, so the photo page landed anywhere
+between 14 and 42 across four runs — treat the column as a margin indicator, not a monotone curve.
+
+v4 for comparison (same page, same delta 8, same palette: ΔB=−8/255): v4 spends twice the observations
+per bit, so its six layouts still report `mac=OK(验签)` at delta=6, while delta=4 pushes the dark/mixed
+pages to 19/512 weak bits. That is why **v5.2 defaults to 4** while **v4 keeps its historical default
+8** (use 6 when you want a fainter grid, after re-checking on a device). Any delta change needs the
+device + darkest-page visibility pass from the integration skill.

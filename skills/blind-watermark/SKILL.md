@@ -15,6 +15,10 @@ LoveLink iOS 端在整个界面上常驻一层肉眼不可见的色度扰动（B
 [`blind-watermark-integration`](../blind-watermark-integration/SKILL.md) —— 参数与载荷构造的约定在那边，
 两边必须一致（`payloadBits` / `plane` / `delta` / 载荷布局）。
 
+先确认截图来源协议：默认是 v4；如果接入端调用了 `Watermark.installV52`，解析必须使用
+`--protocol v5.2`（或在迁移期使用显式 `--protocol auto`）。v4 的 64 字节布局与 v5.2 的 26 字节信息字段 / 32 字节
+BCH 码字不能混解。
+
 **最短路径**（有 `--key` 时）：
 
 ```bash
@@ -27,7 +31,7 @@ swift build -c release --package-path "$BW_REPO"
 
 ---
 
-## 一、容量：512 bit = uid + Unix 秒 + build + 15 字符页面短码 + note + 校验
+## 一、v4 容量：512 bit = uid + Unix 秒 + build + 15 字符页面短码 + note + 校验
 
 ```
 [511:480] uid        32   UInt32   用户 ID 原样放，不用截断、不用查表
@@ -46,9 +50,46 @@ swift build -c release --package-path "$BW_REPO"
 **layout v3（256 bit / 32 字节）已废弃** —— 字段边界变了，老截图用现在的解码器解不出。
 要读 2026-09 之前的老图，用 1.0.0 tag 的解码器。
 
+### v5.2 紧凑协议（显式 opt-in）
+
+v5.2 与 v4 并存，默认渲染与默认解码仍是 v4。接入端用
+`Watermark.installV52(payload:delta:plane:sync:)`，解析端用
+`bwdecode shot.png --protocol v5.2`；旧版裸 `--auto` 仍只做 v4 相位/平面搜索，迁移期混合探测请显式
+`--protocol auto`（先试 v5.2，再回退 v4），想固定旧行为可显式 `--protocol v4`。两套协议的载荷、码字和输出字段不能混用。
+
+v5.2 的信息字段固定为 207 bit：`profile(4)`、`uid(32)`、UTC 2026-01-01 起的
+`timestamp(31 秒)`、`buildTime(24 分钟)`、`page(42，8 字符 base37)`、`app(14)`、
+`note(32，6 字符 base37)`、`CRC24(24)` 和 `reserved(4)`。字段按低位优先写入 26 字节；CRC24
+覆盖前 179 bit，校验通过只说明完整性与解码候选一致，不能替代 HMAC 验签。`page` 沿用
+`PageNameCodec` 归一化后取 8 字符，`note` 只接受 `[a-z0-9_]` 且不超过 6 字符，尾部 `_` 是填充，
+字面尾部 `_` 不可区分。
+
+物理码字是 BCH(255,207,t=6) 加一位整体偶校验，256 px tile 放两份相反业务极性的码字。
+解码器会收集并去重 CRC-valid 候选；不同 payload 同时通过时返回 `ambiguous` 并拒答，不按首个候选
+静默裁决。已知比例可传 `--scale 0.837`；自动路径在 0.50...1.50 粗网格上继续局部精搜，并使用
+fractional rectangle averaging。它只覆盖等比缩放和裁剪，不覆盖旋转、透视、拍屏或聊天软件二次压缩。
+
+`.none` 是默认导频档；`.pn` / `.separated` 只用于实验测量。当前实现的导频在恒定 alpha 的单层 tile
+里加入公共亮度方向调制，会留下可测的 luma 残差，因此不能宣称不可见，也不能替代 P3/sRGB/OLED 人工验收。
+导频只作用于 `--plane chroma`：`--plane luma` 下的亮度通道全给数据用，不写导频，`pilotScore` 无意义
+（CLI 会就此打警告）。
+只有 `--protocol v5.2` 会启用 `--pilot`；v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 或
+`--dump-codes`，因为它没有 HMAC，也不使用 v4 的 15 字符注册表；`--offset` 也不接受负值（相位由解码器
+自己搜索，负相位会被直接拒绝）。
+
+v5.2 第一行输出包含 `protocol=v5.2`、payload、`plane`、`pilot`、`phase`、`scale`、
+`correctedBits`、`softRecovery`、`pilotScore`、`candidateCount`，加上证据档 `minObs` / `avgObs` /
+`|z|中位` 与 `OK(...)` / `TOO_SMALL(...)` 裁决；`--layout` 第二行给出紧凑字段和
+`crcStatus=OK(完整性自检,未验签)`。**v5.2 没有 HMAC**：CRC24 只是完整性自检，措辞里不会出现 `mac=`，
+也不许把它讲成验签。证据门槛与 v4 同一把尺（每 bit 观测 ≥ 5 次）：低于门槛时输出 `TOO_SMALL(...)`，
+加 `--layout` 直接 exit 1 拒答 —— 图小的时候优先让用户发原图，不要拿解出的字段去做溯源结论。
+Python 镜像支持相同参数：`python3 tools/bwdecode.py ...`；修改 v5.2 编解码时必须同时
+更新 `Sources/BlindWatermarkCore/V52Codec.swift` / `V52BCH.swift` 与 `tools/bwdecode.py`，并运行
+`python3 tools/test_bwdecode.py` 做跨语言 PNG 对账。
+
 ### 页面类名怎么进来：短码 + grep
 
-水印里放的是**从类名算出来的 10 字符短码**，不是索引、更不是完整类名（装不下）。
+v4 水印里放的是**从类名算出来的 15 字符短码**，不是索引、更不是完整类名（装不下）。
 它利用 iOS 命名的高冗余，把 `ViewController` 这类每个页面都有的词缀剥掉：
 
 ```
@@ -144,6 +185,18 @@ delta 8 → 弱 bit 32/512，delta 10 → 22，delta 12 → 9。
 "$BW_REPO/.build/release/bwdecode" --pages pages.json --dump-codes
 ```
 
+v5.2 的最小调用是：
+
+```bash
+"$BW_REPO/.build/release/bwdecode" shot-v52.png --protocol v5.2 --layout --scale 0.837
+# 裁剪且比例未知：显式保留 v5.2，再让它搜索 phase / tile / 0.50...1.50 比例
+"$BW_REPO/.build/release/bwdecode" shot-v52.png --protocol v5.2 --auto --layout
+```
+
+v5.2 输出的 `crcStatus=OK` 只代表 CRC 完整性；需要防伪时仍应使用 v4 的 HMAC 部署，或在服务端
+为 compact payload 建立签名封装。看到 `ambiguous` / 非零退出码时停止解读并保留原图，不要从多个候选
+中手工挑一个。
+
 **优先用 `--auto`。** 裁剪过的图（截掉状态栏、分享时裁边）会让载荷整体**旋转**
 却依然自洽：`|z|` 中位依然很高、弱 bit 0/256，输出看着完全正常，但 uid/时间/页面全是错的。
 `--auto` 穷举 2 平面 × 64 相位 × 512 tile 平移（位数只加显式给的 `--bits`），只有校验值能识别出正确那一组。
@@ -175,11 +228,12 @@ build 时间: 2026-09-16 17:22（构建方当地墙上时间）
 | `平面` | `chroma`（默认，不可见）或 `luma` |
 | `相位` | 图案的像素偏移，整屏截图恒为 `(0,0)` |
 | `signal` | 平均特征差。chroma 默认参数下约 9。**它被内容撑大，不能拿来判断成功率** |
-| `\|z\|中位` / `最弱` | 各 bit 显著度。256 bit + chroma 实测中位 29~161，无水印约 0.5 |
+| `\|z\|中位` / `最弱` | 各 bit 显著度。历史 256 bit + chroma 实测中位 29~161；v4/v5.2 应以当前协议测试为准 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
 | `uid` / `time` / `page` / `tag` | `--layout` 解出的字段；`page` 是短码，后面带注册表命中或 grep 提示 |
-| `mac` | 校验分档（见下），**判读优先级最高** |
+| `mac` | 校验分档（见下），**判读优先级最高**。v5.2 没有 `mac` 字段，只有 `crcStatus` |
 | 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印；**`TOO_SMALL` 图太小，解码器拒绝解读字段** |
+| v5.2 专用 | `minObs` / `avgObs`（每 bit 最少 / 平均观测数）、`correctedBits`（BCH 纠错位数）、`softRecovery`、`pilotScore`（仅 chroma 导频，仅诊断）、`candidateCount`；**证据看 `minObs`，裁决看行末的 `OK(...)` / `TOO_SMALL(...)`** |
 
 校验分档（`--layout` 第二行末尾）：
 
@@ -207,8 +261,10 @@ python3 "$BW_REPO/tools/bwdecode.py" shot.png --auto --layout --pages pages.json
 ### 标准排查流程
 
 1. **先看判定里有没有 `TOO_SMALL`**：图太小或图案已被破坏（每 bit 观测 < 5 次），解码器会拒答。
-   别拿小裁剪图硬解 —— 512 bit 实测需要约 2700 个 pair（整宽 1179 时约 300px 高），
-   482×440 这类小图只有 1.5~3.2 次/bit，必然拒答。让对方发**原图 + 更大范围**。
+   别拿小裁剪图硬解 —— v4 的 512 bit 实测需要约 2700 个 pair（整宽 1179 时约 300px 高），
+   482×440 这类小图只有 1.5~3.2 次/bit，必然拒答；v5.2 的 256 bit 码字只要约 1280 个 pair
+   （整宽 1179 时约 150px 高），同一张 300×300 小图实测只有 2.6 次/bit，同样拒答。
+   让对方发**原图 + 更大范围**。
 2. **看病灶在哪一层**：`mac` 是哪个档（有没有校验值）+ 图有没有被裁过。
    `自检` / `验签` 档被裁过也能解；`未签名` / `未校验` 且被裁过 → 走上面的语义一致性兜底，并标注未验签。
 3. 看判定：`NO` → 画面里大概率没水印（系统界面、别的 App）；`WEAK` → 必须结合日志/用户描述交叉验证。
@@ -237,8 +293,8 @@ python3 "$BW_REPO/tools/bwdecode.py" shot.png --auto --layout --pages pages.json
 import BlindWatermarkCore
 
 let image = RGBAImage(cgImage: cgImage)!
-let result = BlockCodec.decode(image, payloadBits: 256, plane: .chroma)!
-print(result.payloadBytes)                       // 32 字节
+let result = BlockCodec.decode(image, payloadBits: 512, plane: .chroma)!
+print(result.payloadBytes)                       // 64 字节
 let fields = WatermarkPayload(bytes: result.payloadBytes)
 print(fields.uid, fields.timestamp, fields.pageNameCode)  // pageNameCode 拿去 grep
 
@@ -250,7 +306,7 @@ let best = BlockCodec.decodeBest(image, validate: { decoded in
 })!
 
 // 平面 / 位数已知，只想求相位：给它一个校验器，否则它只是「块对齐最好」不代表解对了
-let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chroma, validate: { decoded in
+let offset = BlockCodec.findBestOffset(in: image, payloadBits: 512, plane: .chroma, validate: { decoded in
     guard let f = WatermarkPayload(bytes: decoded.payloadBytes) else { return false }
     return f.isValid(key: key)
 })
@@ -264,7 +320,7 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 
 | 情况 | 结果 | 处理 |
 |---|---|---|
-| **截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | 块边长与平铺周期一起变了。让用户重发**原图** |
+| **v4 截图被缩放过**（微信转发、聊天软件压缩、任何 resize） | ❌ 完全解不出 | v4 块边长与平铺周期一起变了。让用户重发**原图**；v5.2 可试显式 `--scale` 或 `--protocol v5.2 --auto` |
 | **拍屏**（另一台手机拍屏幕） | ❌ 解不出 | 摩尔纹 + 几何畸变。需要同步模板或深度学习方案，本仓库不做 |
 | 截图被裁剪（裁掉状态栏、分享时裁边） | ⚠️ 需要补偿 | 给 `--auto`：纵横向裁剪都能搜回来（含半 pair 与奇数块偏移）；裁决靠 HMAC（需 `--key`）或载荷自带的公开自检值 |
 | 非整屏截图（只截一部分区域） | ⚠️ 需要补偿 | 同上，给裁剪原点相对整屏的偏移 |
@@ -276,11 +332,12 @@ let offset = BlockCodec.findBestOffset(in: image, payloadBits: 256, plane: .chro
 `payloadBits` 给错时，bit 的分组方式变了，结果是一份**自洽但错误**的载荷 —— 置信度可能依然很高。
 `plane` 给错通常直接判 `NO`。所以解读之前**先确认接入端用的参数**，不要靠默认值蒙。
 
-### 别把 luma 当备选
+### 别把 luma 当 v4 备选
 
-默认 `delta 8` 是给 **chroma** 定的。256 bit 布局下 luma 平面余量不够：
+默认 `delta 8` 是给 **chroma** 定的。v4 512 bit 布局下 luma 平面余量不够：
 `delta 6` 时六页里弱 bit 4~182/256、文字页直接解错；`delta 12` 才让纯色/白底/深色页回到 0/256，
-文字页仍然是 `mac=BAD`。**要 256 bit 就用 chroma**，需要 luma 只能砍位数并实测。
+文字页仍然是 `mac=BAD`。**v4 要 512 bit 就用 chroma**，需要 luma 只能砍位数并实测；v5.2 也应先用 chroma，
+pilot 档的 luma 残差另行验收。
 
 ### 载荷是谁造的，决定了能查到什么
 

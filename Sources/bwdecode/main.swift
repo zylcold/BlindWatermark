@@ -4,8 +4,9 @@ import Foundation
 import ImageIO
 import BlindWatermarkCore
 
-// 用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma]
-//                 [--layout] [--key <hex>] [--pages <json>] [--auto]
+// 用法: bwdecode <截图路径> [--protocol v4|v5.2|auto] [--bits N] [--offset X,Y]
+//                 [--auto-offset] [--plane luma|chroma] [--pilot none|pn|separated]
+//                 [--scale N] [--layout] [--key <hex>] [--pages <json>] [--auto]
 //   --bits    payload 有效位数，默认 512（layout v4），必须与打水印端一致
 //   --offset  图案相位，截图被裁过时才需要（例如裁掉状态栏后 --offset 0,-N）
 //   --auto-offset 已知平面 / 位数时自动求相位：穷举块网格相位与 tile 平移（rotation）。
@@ -20,6 +21,9 @@ import BlindWatermarkCore
 //   --auto    截图被裁过 / 不确定平面时用：穷举 64 相位 × 双平面 × 512 tile 平移；
 //             同样靠校验值裁决（密钥 → HMAC，无密钥 → 公开自检值）；
 //             都没有则退结构自检并警告 —— 近似解会漏网，必须看弱 bit
+//   --protocol v5.2  显式启用紧凑 207-bit + BCH(255,207) + 偶校验协议；默认仍为 v4
+//   --pilot         v5.2 实验导频档（none 默认；pn / separated 仅用于实验测量）
+//   --scale N       v5.2 已知等比缩放，例如 0.837；--auto 会搜索 0.50...1.50 粗网格并局部精搜
 
 func fail(_ message: String, code: Int32) -> Never {
     FileHandle.standardError.write((message + "\n").data(using: .utf8)!)
@@ -28,6 +32,70 @@ func fail(_ message: String, code: Int32) -> Never {
 
 func warn(_ message: String) {
     FileHandle.standardError.write(("警告: " + message + "\n").data(using: .utf8)!)
+}
+
+func printV52Result(_ result: V52Codec.Decoded, layout: Bool) -> Bool {
+    guard let payload = result.payload, !result.ambiguous else {
+        if result.ambiguous {
+            warn("v5.2 找到多个不同的 CRC-valid payload，拒绝按首个结果裁决（候选 \(result.candidateCount) 个）")
+        } else {
+            warn("v5.2 未找到 BCH + CRC-valid payload（\(result.failureReason ?? "图像太小、相位或缩放不匹配")）")
+        }
+        return false
+    }
+    let hex = payload.bytes.map { String(format: "%02x", $0) }.joined()
+    // 证据分档与 v4 同一把尺：v5.2 只有 CRC24（不是验签），观测不够就必须自己当守门人。
+    let minimum = BlockCodec.minObservationsPerBit
+    let verdict = result.hasSufficientEvidence
+        ? String(format: "OK(每 bit 最少 %d 次观测)", result.minObservations)
+        : String(format: "TOO_SMALL(每 bit 仅 %.1f 次观测、最少 %d 次，需要 ≥ %d：图太小或图案已被破坏)",
+                 result.averageObservations, result.minObservations, minimum)
+    print(String(
+        format: "protocol=v5.2 payload=0x%@  plane=%@  pilot=%@  phase=(%d,%d)  scale=%.4f  correctedBits=%d  softRecovery=%@  pilotScore=%.3f  candidateCount=%d  minObs=%d  avgObs=%.1f  |z|中位=%.1f  %@",
+        hex,
+        result.plane.rawValue,
+        result.sync.rawValue,
+        result.offsetX,
+        result.offsetY,
+        result.estimatedScale,
+        result.correctedBits,
+        result.softRecoveryUsed ? "true" : "false",
+        result.pilotScore,
+        result.candidateCount,
+        result.minObservations,
+        result.averageObservations,
+        result.medianAbsZ,
+        verdict
+    ))
+    if !result.hasSufficientEvidence {
+        let message = String(
+            format: "每 bit 仅 %.1f 次观测（最少 %d 次，需要 ≥ %d）：图太小或图案已被破坏，载荷不可信",
+            result.averageObservations, result.minObservations, minimum
+        )
+        guard layout else {
+            warn(message + "，不要用 --layout 解读字段")
+            return true
+        }
+        fail("图像太小 / 图案已被破坏，不解读字段：可用观测"
+            + "每 bit 仅 \(String(format: "%.1f", result.averageObservations)) 次（最少 \(result.minObservations) 次，需要 ≥ \(minimum)）。"
+            + "请让用户发原图并保证范围足够大（256 bit 码字实测需要约 1280 个 pair，整宽 1179 时约 150px 高）", code: 1)
+    }
+    guard layout else { return true }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'UTC'"
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    print(String(
+        format: "uid=%u(0x%08X)  time=%@  page=%@  buildTime=%@  app=%u  note=%@  profile=%u  crcStatus=OK(完整性自检,未验签)",
+        payload.uid,
+        payload.uid,
+        formatter.string(from: Date(timeIntervalSince1970: TimeInterval(payload.timestamp))),
+        payload.pageNameCode,
+        formatter.string(from: Date(timeIntervalSince1970: TimeInterval(payload.buildTime))),
+        payload.app,
+        payload.note.isEmpty ? "（空）" : payload.note,
+        WatermarkPayloadV52.profile
+    ))
+    return true
 }
 
 /// 载荷里的字段（只对推荐布局有意义；位数不符一律 nil）。
@@ -115,12 +183,39 @@ var key: SymmetricKey?
 var pages: PageRegistry?
 var auto = false
 var dumpCodes = false
+var protocolVersion = "v4"
+var pilot: V52SyncMode = .none
+var v52Scale: Double?
+var bitsExplicit = false
 
 var index = 1
 let arguments = CommandLine.arguments
 while index < arguments.count {
     let argument = arguments[index]
     switch argument {
+    case "--protocol":
+        index += 1
+        guard index < arguments.count else { fail("--protocol 需要 v4、v5.2 或 auto", code: 2) }
+        let value = arguments[index].lowercased()
+        guard ["v4", "4", "v5.2", "v52", "5.2", "auto"].contains(value) else {
+            fail("--protocol 需要 v4、v5.2 或 auto", code: 2)
+        }
+        protocolVersion = value == "v4" || value == "4" ? "v4"
+            : (value == "auto" ? "auto" : "v5.2")
+    case "--v52":
+        protocolVersion = "v5.2"
+    case "--pilot":
+        index += 1
+        guard index < arguments.count, let value = V52SyncMode(rawValue: arguments[index]) else {
+            fail("--pilot 需要 none、pn 或 separated", code: 2)
+        }
+        pilot = value
+    case "--scale":
+        index += 1
+        guard index < arguments.count, let value = Double(arguments[index]), value.isFinite, value > 0, value <= 4 else {
+            fail("--scale 需要一个大于 0 的数，例如 0.837", code: 2)
+        }
+        v52Scale = value
     case "--bits":
         index += 1
         guard index < arguments.count, let value = Int(arguments[index]),
@@ -128,6 +223,7 @@ while index < arguments.count {
             fail("--bits 需要 1...\(BlockCodec.maxPayloadBits) 的整数", code: 2)
         }
         payloadBits = value
+        bitsExplicit = true
     case "--offset":
         index += 1
         let parts = index < arguments.count ? arguments[index].split(separator: ",") : []
@@ -174,6 +270,10 @@ while index < arguments.count {
     index += 1
 }
 
+// `--protocol auto` is itself an auto-detection request; set the shared flag
+// before checking the mutually exclusive legacy geometry options.
+if protocolVersion == "auto" { auto = true }
+
 if autoOffset && explicitOffset {
     fail("--auto-offset 与 --offset 互斥：前者就是自动求后者，同时给无法判断以哪个为准", code: 2)
 }
@@ -181,7 +281,39 @@ if autoOffset && auto {
     fail("--auto-offset 与 --auto 语义重叠：--auto 已经穷举相位 / 平面 / 位数，单独用 --auto 即可", code: 2)
 }
 
+// `--auto` keeps its historical v4 phase/plane search semantics. Protocol
+// auto-detection is opt-in through the explicit `--protocol auto` spelling.
+// `--protocol v5.2 --auto` still means v5.2-only geometry search.
+
+if protocolVersion == "v5.2" {
+    if bitsExplicit {
+        fail("v5.2 的物理码字固定为 256 bit（信息字段 207 bit），不要传 v4 的 --bits", code: 2)
+    }
+    if key != nil { fail("v5.2 只有 CRC24，没有 v4 的 HMAC；请去掉 --key", code: 2) }
+    // pilot 要从亮度通道叠调制，luma 平面已经把亮度通道拿去放数据了。
+    if pilot != .none && plane == .luma {
+        warn("--pilot \(pilot.rawValue) 在 --plane luma 下不会写入导频（luma 平面把亮度通道全部用于数据），"
+            + "输出的 pilotScore 无意义；要测导频请用 --plane chroma")
+    }
+}
+
+if protocolVersion == "v5.2" && pages != nil {
+    fail("--pages 是 v4 的 15 字符注册表；v5.2 只输出 8 字符 compact page code，请去掉 --pages", code: 2)
+}
+if protocolVersion == "auto" && key != nil {
+    warn("--protocol auto 带 --key 时，v5.2 分支仍只验证 CRC24（不使用 HMAC）；若需强制验签请显式 --protocol v4")
+}
+if protocolVersion == "auto" && bitsExplicit {
+    warn("--protocol auto 的 v5.2 探测固定 256-bit 码字，忽略 --bits；v4 回退仍使用该参数")
+}
+if protocolVersion == "auto" && pages != nil {
+    warn("--pages 仅用于 v4 回退；v5.2 输出 compact page code，不使用旧 15 字符注册表")
+}
+
 if dumpCodes {
+    if protocolVersion == "v5.2" {
+        fail("--dump-codes 当前只支持 v4 页面注册表；v5.2 请使用 compact page code 定位", code: 2)
+    }
     guard let pages else {
         fail("--dump-codes 需要配合 --pages 使用", code: 2)
     }
@@ -195,7 +327,7 @@ if dumpCodes {
 }
 
 guard let path else {
-    fail("用法: bwdecode <截图路径> [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--layout] [--key <hex>] [--pages <json>] [--auto]", code: 2)
+    fail("用法: bwdecode <截图路径> [--protocol v4|v5.2|auto] [--bits N] [--offset X,Y] [--auto-offset] [--plane luma|chroma] [--pilot none|pn|separated] [--scale N] [--layout] [--key <hex>] [--pages <json>] [--auto]", code: 2)
 }
 
 let url = URL(fileURLWithPath: path)
@@ -205,6 +337,41 @@ guard
     let image = RGBAImage(cgImage: cgImage)
 else {
     fail("读不到图片: \(path)", code: 1)
+}
+
+// v5.2 is opt-in. In `auto` mode it gets one protocol-aware chance before the
+// historical v4 ladder; a CRC-valid v5.2 result wins and an ambiguous result is
+// refused instead of being reinterpreted as v4.
+if protocolVersion == "v5.2" || protocolVersion == "auto" {
+    let explicitV52 = protocolVersion == "v5.2"
+    let scales = v52Scale.map { [$0] } ?? (auto ? V52Codec.defaultScales : [1.0])
+    let v52Result: V52Codec.Decoded?
+    if explicitV52 && !auto && !autoOffset {
+        v52Result = V52Codec.decode(
+            image,
+            plane: plane,
+            sync: pilot,
+            scale: v52Scale ?? 1.0,
+            offsetX: offsetX,
+            offsetY: offsetY,
+            searchTile: false
+        )
+    } else {
+        v52Result = V52Codec.decodeBest(
+            image,
+            scales: scales,
+            planes: explicitV52 ? [plane] : [.chroma, .luma],
+            syncModes: [pilot],
+            searchPhase: true,
+            searchTile: explicitV52 ? (auto || autoOffset) : true
+        )
+    }
+    if let v52Result {
+        if printV52Result(v52Result, layout: showLayout) { exit(0) }
+        fail("v5.2 解码未形成唯一的 BCH + CRC-valid 结果", code: 1)
+    } else if explicitV52 {
+        fail("v5.2 解码失败：未找到 BCH + CRC-valid 结果，请检查 --plane/--pilot/--scale/--offset", code: 1)
+    }
 }
 
 let result: BlockCodec.Decoded?

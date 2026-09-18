@@ -5,6 +5,9 @@ import BlindWatermarkAutoLoad
 
 /// SPM 下 `BlindWatermarkCore` 是另一个模块，接入方只 `import BlindWatermark` 时也得能拿到这个枚举。
 public typealias WatermarkPlane = BlindWatermarkCore.WatermarkPlane
+/// v5.2 的公开类型同样从 UI 门面导出，接入方无需额外 import Core 模块。
+public typealias WatermarkPayloadV52 = BlindWatermarkCore.WatermarkPayloadV52
+public typealias V52SyncMode = BlindWatermarkCore.V52SyncMode
 
 /// 屏上盲水印入口。
 ///
@@ -63,6 +66,47 @@ public enum Watermark {
         install(payload: bytes, payloadBits: payloadBits, delta: delta, plane: plane)
     }
 
+    /// Explicit opt-in v5.2 path. The default `install(payload:)` remains the
+    /// historical v4 renderer so existing integrations keep their protocol.
+    ///
+    /// `delta` 默认 4 而不是 v4 的 8：v5.2 每 bit 有两份反极性副本，观测余量是 v4 的两倍，
+    /// 真机模拟器实测六版式在 delta=4（甚至 2）下 `correctedBits=0`、`candidateCount=1`。
+    /// 可见性是色度轴幅度 = `delta`（亮度轴已被陪色匹配到 ~0.4/255），所以这个默认值直接
+    /// 减半了肉眼能看到的色差。改它之前先按 `skills/blind-watermark-integration` 重跑可见性验收。
+    public static func installV52(
+        payload: WatermarkPayloadV52,
+        delta: UInt8 = 4,
+        plane: WatermarkPlane = .chroma,
+        sync: V52SyncMode = .none,
+        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
+    ) {
+        WatermarkState.shared.configureV52(
+            payload: payload,
+            delta: delta,
+            plane: plane,
+            sync: sync,
+            windowLevel: windowLevel
+        )
+        WatermarkState.shared.start()
+    }
+
+    /// Update an already mounted v5.2 watermark while preserving its render
+    /// parameters. `sync` can be changed explicitly for pilot experiments.
+    public static func updateV52(
+        payload: WatermarkPayloadV52,
+        sync: V52SyncMode? = nil
+    ) {
+        let config = WatermarkState.shared.effectiveConfig()
+        WatermarkState.shared.configureV52(
+            payload: payload,
+            delta: config.delta,
+            plane: config.plane,
+            sync: sync ?? config.v52Sync,
+            windowLevel: config.windowLevel
+        )
+        WatermarkState.shared.refreshPatterns()
+    }
+
     /// 零接入模式下的 payload 来源。默认用 `identifierForVendor` 哈希 + Unix 秒
     /// 拼一个 layout v4（512 bit）载荷（`WatermarkDefaultPayload.currentBytes()`）。
     ///
@@ -82,6 +126,8 @@ final class WatermarkState {
         var payloadBits: Int
         var delta: UInt8
         var plane: WatermarkPlane
+        var v52Payload: WatermarkPayloadV52?
+        var v52Sync: V52SyncMode
         var windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
     }
 
@@ -106,6 +152,28 @@ final class WatermarkState {
             payloadBits: payloadBits,
             delta: delta,
             plane: plane,
+            v52Payload: nil,
+            v52Sync: .none,
+            windowLevel: windowLevel
+        )
+    }
+
+    func configureV52(
+        payload: WatermarkPayloadV52,
+        delta: UInt8,
+        plane: WatermarkPlane,
+        sync: V52SyncMode,
+        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
+    ) {
+        config = Config(
+            payload: payload.bytes,
+            // v5.2 分支不读 payloadBits（走 v52Payload 生成 tile），这里存消息位数而不是物理码字长度，
+            // 免得后来者把一个 26 字节的 payload 当成 32 字节码字。
+            payloadBits: payload.bytes.count * 8,
+            delta: delta,
+            plane: plane,
+            v52Payload: payload,
+            v52Sync: sync,
             windowLevel: windowLevel
         )
     }
@@ -178,17 +246,34 @@ final class WatermarkState {
     func effectiveConfig() -> Config {
         if let config { return config }
         let payload = payloadProvider?() ?? WatermarkDefaultPayload.currentBytes()
-        return Config(payload: payload, payloadBits: min(BlockCodec.maxPayloadBits, payload.count * 8), delta: 8, plane: .chroma)
+        return Config(
+            payload: payload,
+            payloadBits: min(BlockCodec.maxPayloadBits, payload.count * 8),
+            delta: 8,
+            plane: .chroma,
+            v52Payload: nil,
+            v52Sync: .none
+        )
     }
 
     private func makePattern(scale: CGFloat) -> UIImage? {
         let config = effectiveConfig()
-        let tile = BlockCodec.makeTile(
-            payload: config.payload,
-            payloadBits: config.payloadBits,
-            alpha: config.delta,
-            plane: config.plane
-        )
+        let tile: RGBAImage
+        if let compact = config.v52Payload {
+            tile = V52Codec.makeTile(
+                payload: compact,
+                alpha: config.delta,
+                plane: config.plane,
+                sync: config.v52Sync
+            )
+        } else {
+            tile = BlockCodec.makeTile(
+                payload: config.payload,
+                payloadBits: config.payloadBits,
+                alpha: config.delta,
+                plane: config.plane
+            )
+        }
         guard let cgImage = tile.makeCGImage() else { return nil }
         // scale 与屏幕一致，tile 才是 256 **设备像素**，块大小恒定 16 设备像素
         return UIImage(cgImage: cgImage, scale: max(1, scale), orientation: .up)
