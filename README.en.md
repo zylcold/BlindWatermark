@@ -207,7 +207,9 @@ v5.2 uses BCH + CRC candidate collection and never accepts the first CRC-valid c
 `--auto-offset` is the narrower v4 version: it assumes `--bits` / `--plane` are already correct
 (512 / chroma by default) and only searches **the block grid phase (mod 8)**. It additionally
 enumerates the 512 tile shifts **only when `--key` is given** (MAC arbitration). It is mutually
-exclusive with `--offset` and overlaps `--auto` (passing both exits with an error).
+exclusive with `--offset` and overlaps `--auto` (passing both exits with an error). Without
+`--key` it can only rank by median `|z|` and **does not guarantee a correct payload** — read the
+weak-bit count.
 
 **Black borders are trimmed automatically**: IM clients, image viewers, and CleanShot wrap screenshots
 in a solid black frame (sometimes with rounded corners). The frame itself contributes no observations,
@@ -219,9 +221,15 @@ first and append `trim=(left,top,right,bottom)` to the result line; **`phase` is
 image**. An explicit `--offset` means the caller owns the geometry and nothing is trimmed. Dark UI
 backgrounds are not mistaken for borders: a black band that reaches the 25% cap aborts trimming
 entirely, and the strip just inside the border must be followed by clearly brighter content
-(thresholds: `RGBAImage.BorderTrimHeuristic`). Without
-`--key` it can only rank by median `|z|` and **does not guarantee a correct payload** — read the
-weak-bit count.
+(thresholds: `RGBAImage.BorderTrimHeuristic`).
+
+![black border trimming](docs/images/black-border-trim.png)
+
+The figure above is a **synthetic illustration** (not a real screenshot): a 9/14 px solid black frame
+around a synthetic v5.2 image, with the automatically detected content area outlined in red. Untrimmed,
+the false differences at the frame/content boundary land on the same bits every tile period until the
+BCH budget is exhausted and the whole image fails; trimmed, the same image reports `correctedBits=0`
+(a real WeChat Work forwarded screenshot goes from failing to `page=ccnewcha`).
 
 Tile shifts must be searched because cropping off a non-multiple of 256 pixels moves the tile
 origin relative to the image; every local pair index shifts, which shows up as a **rotation** of
