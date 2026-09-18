@@ -25,11 +25,28 @@ enum DemoWatermark {
     static let demoUID: UInt32 = 0xDEAD_BEEF
     static let demoTag: UInt32 = 1
 
+    /// `BW_PROTOCOL=v52` 切到 v5.2 紧凑协议（默认 v4）；`BW_SYNC=pn|separated` 选实验导频档。
+    static var usesV52: Bool {
+        let value = ProcessInfo.processInfo.environment["BW_PROTOCOL"]?.lowercased()
+        return value == "v52" || value == "v5.2"
+    }
+
     static func install(page: DemoPage) {
         let env = ProcessInfo.processInfo.environment
         let plane = env["BW_PLANE"].flatMap(WatermarkPlane.init(rawValue:)) ?? .chroma
+        let delta = env["BW_DELTA"].flatMap({ UInt8($0) })
+        if usesV52 {
+            guard let compact = compactPayload(page: page) else { fatalError("v5.2 payload 不合法") }
+            Watermark.installV52(
+                payload: compact,
+                delta: delta ?? 8,
+                plane: plane,
+                sync: env["BW_SYNC"].flatMap(V52SyncMode.init(rawValue:)) ?? .none
+            )
+            return
+        }
         let payload = self.payload(page: page)
-        if let delta = env["BW_DELTA"].flatMap({ UInt8($0) }) {
+        if let delta {
             Watermark.install(payload: payload, delta: delta, plane: plane)
         } else {
             Watermark.install(payload: payload, plane: plane)
@@ -37,7 +54,31 @@ enum DemoWatermark {
     }
 
     static func update(page: DemoPage) {
+        if usesV52 {
+            guard let compact = compactPayload(page: page) else { return }
+            Watermark.updateV52(payload: compact)
+            return
+        }
         Watermark.update(payload: payload(page: page))
+    }
+
+    /// v5.2 的时间字段是 UTC 2026-01-01 起的秒 / 分钟偏移，demo 直接给当前时间；
+    /// note 只接受 `[a-z0-9_]` 且最多 6 字符 —— `BW_NOTE` 先归一化，否则 init 返回 nil。
+    private static func compactPayload(page: DemoPage) -> WatermarkPayloadV52? {
+        let now = UInt64(max(0, Date().timeIntervalSince1970))
+        return WatermarkPayloadV52(
+            uid: demoUID,
+            timestamp: now,
+            buildTime: now,
+            pageClassName: page.className,
+            app: UInt16(demoTag),
+            note: compactNote(ProcessInfo.processInfo.environment["BW_NOTE"] ?? "")
+        )
+    }
+
+    static func compactNote(_ raw: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789_")
+        return String(raw.lowercased().filter { allowed.contains($0) }.prefix(6))
     }
 
     /// layout v4：uid + Unix 秒 + build + 20 字符页面短码 + note + 校验值。
@@ -120,7 +161,9 @@ struct PayloadFooter: View {
     let page: DemoPage
 
     var body: some View {
-        Text("uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  \(page.className) → \(PageNameCodec.code(for: page.className))  app=\(DemoWatermark.demoTag)")
+        Text(DemoWatermark.usesV52
+             ? "v5.2  uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  page=\(String(PageNameCodec.code(for: page.className).prefix(8)))  app=\(DemoWatermark.demoTag)  note=\(DemoWatermark.compactNote(ProcessInfo.processInfo.environment["BW_NOTE"] ?? ""))"
+             : "uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  \(page.className) → \(PageNameCodec.code(for: page.className))  app=\(DemoWatermark.demoTag)")
             .font(.caption2.monospaced())
             .foregroundStyle(.secondary)
     }
