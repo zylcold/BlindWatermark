@@ -370,13 +370,36 @@ if protocolVersion == "v5.2" || protocolVersion == "auto" {
             searchTile: false
         )
     } else {
-        v52Result = V52Codec.decodeBest(
+        let searchTile = explicitV52 ? (auto || autoOffset) : true
+        let planes: [WatermarkPlane] = explicitV52 ? [plane] : [.chroma, .luma]
+        var fast: V52Codec.Decoded?
+        if auto, v52Scale == nil {
+            // 粗定位：比例尺先给 1 个平面 + ±10% 的 5 档候选，省掉 21 档粗网格 × 2 平面。
+            if let hint = ScaleRuler.estimate(workingImage, planes: planes),
+               hint.confidence >= ScaleRuler.minConfidence {
+                warn(String(
+                    format: "比例尺粗定位：%@ scale≈%.3f（置信 %.2f）→ 只在候选附近精搜 / scale ruler hint",
+                    hint.plane.rawValue, hint.scale, hint.confidence
+                ))
+                fast = V52Codec.decodeBest(
+                    workingImage,
+                    scales: ScaleRuler.candidateScales(for: hint),
+                    planes: [hint.plane],
+                    syncModes: [pilot],
+                    searchPhase: true,
+                    searchTile: searchTile
+                )
+                // ambiguous 不值得信，交给完整网格重搜
+                if let candidate = fast, !candidate.isSuccess { fast = nil }
+            }
+        }
+        v52Result = fast ?? V52Codec.decodeBest(
             workingImage,
             scales: scales,
-            planes: explicitV52 ? [plane] : [.chroma, .luma],
+            planes: planes,
             syncModes: [pilot],
             searchPhase: true,
-            searchTile: explicitV52 ? (auto || autoOffset) : true
+            searchTile: searchTile
         )
     }
     if let v52Result {

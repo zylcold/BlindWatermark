@@ -538,6 +538,75 @@ def test_v52() -> bwdecode.WatermarkPayloadV52:
     return payload
 
 
+def test_scale_ruler() -> None:
+    """比例尺粗定位 + 粗筛按比例排名的回归。"""
+    print("比例尺粗定位 / 非网格比例")
+    payload = bwdecode.WatermarkPayloadV52.build(uid=0x12345678, timestamp=1767250000,
+                                                 build_time=1767250000,
+                                                 page_class_name="ProfileViewController", note="hotfix")
+    base = v52_shot(payload, offset=(3, 5), width=528, height=792)
+    for scale in (0.50, 0.837, 1.173, 1.50):
+        resized = np.ascontiguousarray(resize_nearest(base, scale))
+        hint = bwdecode.estimate_scale_ruler(resized, planes=("chroma",))
+        check(hint is not None, f"scale={scale}：给出估计")
+        plane, estimated, confidence = hint
+        check(plane == "chroma", f"scale={scale}：平面 {plane}")
+        check(abs(estimated - scale) / scale <= 0.08, f"scale={scale}：估计 {estimated:.3f}（误差 ≤8%）")
+        check(confidence >= bwdecode.SCALE_RULER_MIN_CONFIDENCE, f"scale={scale}：置信 {confidence:.2f}")
+        candidates = bwdecode.ruler_candidate_scales(estimated)
+        check(len(candidates) == bwdecode.SCALE_RULER_STEPS, f"scale={scale}：{len(candidates)} 个候选")
+        check(any(abs(c - scale) / scale <= 0.03 for c in candidates),
+              f"scale={scale}：候选 {candidates} 罩住真值")
+
+    plain = np.zeros((792, 528, 4), dtype=np.uint8)
+    plain[:, :, :3] = 200
+    plain[:, :, 3] = 255
+    quiet = bwdecode.estimate_scale_ruler(plain)
+    check(quiet is None or quiet[2] < bwdecode.SCALE_RULER_MIN_CONFIDENCE,
+          f"无水印图比例尺置信度低（{None if quiet is None else round(quiet[2], 3)}）")
+
+    # 回归：粗筛按比例排名前，同一比例的上百个相位会挤满 top-N，0.837 / 1.173 这类
+    # 非粗网格比例进不了精搜（显式 --scale 能解、默认网格解不出）
+    for scale in (0.837, 1.173):
+        resized = np.ascontiguousarray(resize_nearest(base, scale))
+        result = bwdecode.v52_decode_best(
+            resized, scales=list(bwdecode.V52_DEFAULT_SCALES), planes=("chroma",),
+            sync_modes=(bwdecode.V52_SYNC_NONE,), search_phase=True, search_tile=True)
+        check(result is not None and result.payload == payload,
+              f"默认 21 档网格解出 scale={scale}")
+        check(result is not None and abs(result.estimated_scale - scale) < 0.004,
+              f"scale={scale} 估计精度 {None if result is None else round(result.estimated_scale, 4)}")
+
+    # 跨语言：同一张图，两端比例尺估计要一致
+    if not os.path.exists(SWIFT_CLI):
+        print(f"  跳过 CLI 对账：没有 {SWIFT_CLI}（先 swift build -c release）")
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "scaled.png")
+        Image.fromarray(np.ascontiguousarray(resize_nearest(base, 0.837)), mode="RGBA").save(path)
+        estimates = []
+        for name, command in (("Swift", [SWIFT_CLI]),
+                              ("Python", [sys.executable, os.path.join(REPO, "tools", "bwdecode.py")])):
+            result = subprocess.run(
+                command + [path, "--protocol", "v5.2", "--auto", "--layout"],
+                capture_output=True, text=True, check=True,
+            )
+            marker = "scale≈"
+            check(marker in result.stderr, f"{name} CLI 打出比例尺粗定位")
+            raw = result.stderr.split(marker)[1]
+            digits = ""
+            for character in raw:
+                if character.isdigit() or character == ".":
+                    digits += character
+                else:
+                    break
+            estimates.append(float(digits))
+            check(f"payload=0x{payload.bytes.hex()}" in result.stdout.splitlines()[0],
+                  f"{name} CLI：粗定位后解出同一份 payload")
+        check(abs(estimates[0] - estimates[1]) / estimates[0] <= 0.03,
+              f"两端比例尺估计一致（{estimates[0]:.3f} / {estimates[1]:.3f}）")
+
+
 def test_border_trim() -> None:
     """黑边（IM 转发 / 图片查看器套的纯黑边框）必须自动裁掉，深色页留白必须不动。"""
     print("黑边自动裁剪")
@@ -722,6 +791,7 @@ def main() -> int:
         test_page_codec()
         v52_payload = test_v52()
         test_border_trim()
+        test_scale_ruler()
         test_swift_cross_check(payload)
         test_swift_v52_cross_check(v52_payload)
     except AssertionError as error:
