@@ -72,7 +72,7 @@ chroma is the default: the 6/255 luma grid of luma mode is visible up close.
   watermark component adds up with the same sign while the picture's own luma gradient cancels.
 - Reading is not taking a sign: signed differences are accumulated and divided by the standard
   error to get a z value. The watermark grows linearly with the number of observations, content
-  noise decays as `1/√n`. One iPhone 16 screenshot gives each bit ~90 observations
+  noise decays as `1/√n`. One iPhone 16 screenshot gives each bit ~45 observations
   (512-bit layout, 23287 pairs in total).
 
 The decode margin was also measured, not guessed (iPhone 16, 3x, luma mode, 32-bit layout):
@@ -348,6 +348,137 @@ codeword. Each 256 px tile carries two copies with opposite business polarity. B
 bit errors. A bounded Chase pass tries at most two flips among the twelve least reliable bits, collects
 all CRC-valid candidates, deduplicates them, and reports `ambiguous` if different payloads remain.
 CRC is an integrity check, not a signature.
+
+### v5.2 scheme breakdown: principles, strengths, and limits
+
+v5.2 is a chain of six layers rather than one “encryption algorithm”: payload packing, error correction,
+spatial coding, synchronization, geometry search, and candidate adjudication. Each layer solves a different
+problem and has its own failure boundary:
+
+```mermaid
+flowchart LR
+    P["Fixed fields: 207 bits<br/>CRC24 + reserved"] --> E["BCH(255,207)<br/>+ even parity = 256 bits"]
+    E --> T["8×8 blocks / 256×256 tile<br/>512 pairs, two opposite-polarity copies"]
+    T --> S{"sync"}
+    S -->|none| D["chroma/luma pair difference"]
+    S -->|pn / separated| Q["pair difference + PN correlation"]
+    D --> G["fractional averaging<br/>scale / phase / tile-shift search"]
+    Q --> G
+    G --> C["BCH decode + CRC<br/>hard decision, then bounded Chase"]
+    C --> U{"unique payload?"}
+    U -->|yes| O["payload + diagnostics"]
+    U -->|no| A["ambiguous / reject"]
+```
+
+#### 1. Compact payload and field constraints
+
+**Principle.** `uid`, timestamps, page, app id, and a short note are written into fixed-width fields in
+207 bits. Page and note use base37; CRC24 covers the first 179 bits and the final four bits are reserved
+as zero. Every field is little-endian and fixed-width, so Swift and Python can reconcile bit-for-bit without
+sharing an object serialization format.
+
+**Strengths.** The 26-byte message becomes one 256-bit physical codeword, so a 256 px tile can carry two
+copies; compared with putting a 512-bit business payload into the same tile, each codeword bit gets more
+observation headroom. The fixed fields, profile, and reserved bits also provide cheap structural filtering:
+bad alignment is usually rejected before it reaches the business layer.
+
+**Limits.** This is a capacity optimization, not a general metadata container. Page is limited to eight
+base37 characters, note to six `[a-z0-9_]` characters, and a trailing `_` cannot be distinguished from padding;
+the timestamp and build-time fields also have finite epoch windows. CRC detects accidental corruption but
+does not prove that a server issued the payload; use a signature or HMAC at the business layer for
+authenticity. If arbitrary UTF-8 text is needed, keep it in a server-side index instead of forcing it into v5.2.
+
+#### 2. BCH(255,207) and the even-parity extension
+
+**Principle.** `V52BCH` performs systematic polynomial division with a fixed GF(256) and generator polynomial,
+producing 48 BCH parity bits. The decoder computes syndromes `S1...S12`, derives an error-locator polynomial
+with Berlekamp–Massey, finds positions with a Chien search, and flips at most six errors. Bit 256 is an
+independent even-parity extension; a final systematic re-encode check rejects a spurious locator.
+
+**Strengths.** The correction rule, bit order, and golden vectors are fixed, and both Swift and Python do it
+without a third-party dependency. Up to six hard-decision errors in one 255-bit codeword have a clear BCH
+guarantee; a flipped extension parity bit can be repaired separately. CRC is checked after BCH, covering both
+channel recovery and field validity.
+
+**Limits.** `t=6` applies to the BCH codeword error model only. Block misalignment, burst errors, clipped colors,
+and more than six errors are outside the guarantee. Chase is a bounded reliability heuristic—at most twelve
+bits and two flips—not an eight-bit (or higher) BCH guarantee, and it costs additional time. Neither BCH nor
+CRC provides confidentiality or authenticity.
+
+#### 3. 8×8 blocks, tiled layout, and opposite-polarity copies
+
+**Principle.** Two adjacent 8×8 blocks form a pair; the sign of their mean difference carries one bit. A
+256×256 px tile has 32×16 = 512 pairs. The first 256 pairs carry the original codeword and the second 256
+pairs carry the opposite business polarity. The decoder uses `copySign` to fold both copies onto one codeword
+index and aggregates observations as z-scores.
+
+**Strengths.** Flat blocks survive light screenshot or JPEG blur better than single-pixel noise. Left-right
+differencing cancels the background term, so white, black, and coloured backgrounds are all usable. The second
+copy gives each v5.2 codeword bit more observations and allows tile-index shifts to recover a cropped phase;
+opposite business polarity also cancels similarly directed content gradients across the two copies.
+
+**Limits.** The 256 px tile and 8 px block are fixed geometry. Small images, non-integer scaling, or heavy
+resampling reduce observations; tile-shift search compensates indexing and does not mean that image rotation
+is supported. The duplicate copy consumes tile space rather than increasing business capacity, and its errors
+are not guaranteed to be independent: occlusion, clipping, or a gradient can affect both copies. Without a
+valid CRC/HMAC, a wrong tile shift must be rejected rather than selected because it “looks clean.”
+
+#### 4. `sync=none`, `pn`, and `separated` pilots
+
+**Principle.** `.none` carries only the business difference and is the default baseline. `.pn` adds a
+deterministic PN sequence across all 512 pairs. `.separated` uses the same PN index for the two BCH copies,
+so pilot correlation can add while business data is recovered by opposite-polarity differencing. The current
+implementation writes pilot and data together in a constant-alpha, single-layer RGBA tile and measures
+correlation from luma pair differences.
+
+**Strengths.** A pilot uses no payload bits and can expose phase, scale, and signal-quality diagnostics. When
+gain is equal and both copies survive, `.separated` gives a more stable correlation signal than a single copy.
+It is useful for experiments and tuning without changing the business field protocol.
+
+**Limits.** Adding RGB modulation in the brightness direction leaves measurable luma residual, and pilot
+amplitude (about 1–2 in current settings) consumes alpha headroom, reducing data amplitude. Pilot correlation
+therefore does not establish visual invisibility. Cropping one copy, unequal resampling gain, colour-space
+conversion, JPEG, or camera capture breaks ideal cancellation; `.pn` and `.separated` do not replace manual
+P3, sRGB, and OLED visibility review. Production should stay on `.none` unless residuals and acceptance
+conditions are recorded separately.
+
+#### 5. Fractional rectangle averaging and uniform-scale search
+
+**Principle.** The decoder builds an integral image for each feature plane and uses rectangle means with
+fractional boundaries to model a resized block, instead of rounding the scale to an integer block. `decodeBest`
+first ranks a 0.50...1.50 coarse grid at 0.05 steps, then refines local winners while rechecking block phase
+and tile-index shifts, and only then enters BCH/CRC decoding.
+
+**Strengths.** The scale need not be a hard-coded whitelist: 0.50, 0.837, 1.173, and 1.50, plus small arbitrary
+crop offsets, were recovered under the experiment conditions. Cheap statistics filter geometry contexts before
+the bounded 512 tile shifts and Chase budget are spent.
+
+**Limits.** This is a uniform-scale model; it says nothing about rotation, perspective, camera capture, local
+crop, or messenger recompression. Resampling kernels, JPEG 4:2:0, P3/sRGB, and device pipelines need separate
+measurements. Wider scale ranges and candidate budgets cost time and memory. Current phase search covers integer
+pixel positions; subpixel phase remains a later experiment. `estimatedScale` is the best geometric candidate,
+not proof of a particular resampler.
+
+#### 6. Candidate collection, CRC adjudication, and `ambiguous`
+
+**Principle.** Hard bits come from the signs of the z-scores. The decoder tries BCH and payload CRC for each
+tile index; if hard decisions fail, it enumerates up to two flips among the twelve least reliable bits. Every
+CRC-valid result is collected, deduplicated by payload bytes, and represented by its highest-scoring observation.
+If more than one distinct payload remains, the result is `ambiguous` rather than the first passing candidate.
+
+**Strengths.** This separates “found a self-consistent result” from “proved the result is unique,” preventing a
+wrong phase or a plain image from silently winning by chance. `candidateCount`, `correctedBits`,
+`softRecovery`, `scale`, and `phase` also show how much recovery was needed.
+
+**Limits.** CRC false positives are unlikely but not mathematically impossible, and z-scores are not calibrated
+error probabilities. Rejecting an ambiguous set is correct but lowers recall. Scores are for ranking, not for
+confidence or signature verification. For an answer to “who issued this watermark,” the payload needs a
+server-verifiable signature reference or a server-side check of uid, time, and page.
+
+For deployment, keep existing v4 screenshots on the default v4 path. Use v5.2 `.none` for new integrations that
+need a compact payload and uniform-resize tolerance. Run `.pn` / `.separated` separately when measuring sync
+quality and record their residuals. Use `--protocol auto` only for migration-time mixed detection; the historical
+bare `--auto` remains v4 search and is not a cross-protocol probe.
 
 The 207-bit field order is (low bit first):
 
