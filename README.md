@@ -492,7 +492,19 @@ chroma 加法理解。
 `payloadProvider` 只服务零接入的 v4 默认载荷：v5.2 的载荷由 `installV52` / `updateV52` 给出，时间戳在
 install 时固定，需要新时间就得自己再调一次 `updateV52`。
 
-等比缩放路径使用 fractional rectangle averaging。默认自动搜索是 0.50...1.50、步长 0.05 的连续粗网格，
+等比缩放路径使用 fractional rectangle averaging。自动搜索前先跑**比例尺粗定位**：水印在 x 方向是
+`[block, !block]` 交替的块对，所以水平自相关在 `lag = block` 处最负、`lag = 2*block` 处最正 —— 用
+"谷 + 2 倍峰"的联合目标在细网格上插值，10~50ms 就能把 block 边长读出来（`scale = block / 8`），
+只在该比例的 ±10% 五档候选上精搜，省掉 21 档 × 2 平面的粗网格。置信度 = 谷深（水印图实测 0.30~0.74，
+无水印纯色/彩色噪声 ≈ 0.00），置信不足或快路径失败时**退回完整网格**，行为与以前一致。比例尺精度
+实测：合成图 0.50 / 0.75 / 1.00 / 1.50 精确，1.173 / 1.30 ≤1.3%，0.837 4.5%，企业微信转发的真实
+缩放图 7.6%，所以要靠候选区间 + 局部精搜收尾（`estimatedScale` 仍是精搜后的值）。
+
+粗筛也按**比例**而不是按单个上下文排名：一个比例有上百个相位，按上下文排序会让它们挤满 top-16，
+非粗网格比例（1.173 这类）根本进不了精搜 —— 修前的症状正是"显式 `--scale 1.173` 能解，默认网格
+解不出"。修后 0.50...1.50 的七个比例在 CLI 上一次跑通。
+
+搜索仍是 0.50...1.50、步长 0.05 的连续粗网格，
 然后对入围比例做细化，步长继续缩小到不大于 `0.5 / max(width,height)`，并重新检查局部 phase；0.837 和
 1.173 这类不在粗网格中的比例属于实验覆盖，不构成所有图片/重采样器的保证。当前只覆盖等比缩放，旋转/透视、
 拍屏、IM 二次压缩仍是非目标。
@@ -507,7 +519,10 @@ PNG，数据 tile 平铺；时间包含相应的搜索参数）：
 | pilot | 同上，`.pn` / `.separated` | payload 一致；pilot score 均约 0.995（仅诊断） |
 | resize | nearest 生成的 0.50 / 0.837 / 1.173 / 1.50 倍图，比例显式给出 | 4/4 payload 一致 |
 | 未列比例搜索 | 0.837，`--protocol v5.2 --auto` 默认粗网格 + 局部精搜 | release 约 0.66 s（debug 11.7 s），估计 scale 0.8358，payload 一致 |
-| 整屏搜索 | 1179×2556，`--protocol v5.2 --auto` | release 3.9 s，payload 一致 |
+| 整屏搜索 | 1179×2556，`--protocol v5.2 --auto` | release 3.9 s → **1.22 s**（比例尺粗定位后），payload 一致 |
+| 非网格比例 | 0.50 / 0.75 / 0.837 / 1.0 / 1.173 / 1.3 / 1.5，`--protocol v5.2 --auto` | 7/7 payload 一致，`estimatedScale` 误差 ≤0.4%（粗定位估计值误差 ≤8%） |
+| 转发缩放图 | 企业微信转发的 0.8134 缩放图 + 黑边 | 1.35 s 解出，`minObs` 13 → 40 |
+| v4 图走 `--protocol auto` | 1179×2556 | 7.7 s → 8.9 s（比例尺 + 5 档快路径的固定开销，最终仍回退 v4） |
 | 证据门槛 | 320×320 小图（`minObs=2` /bit） | `TOO_SMALL`，拒绝 `--layout`（两端 exit 1） |
 | 裁剪 | 左 9 px、上 13 px，未知 phase/tile rotation | payload 一致，1 个候选 |
 | 负样本 | 640×900 无水印纯色图 | 无 CRC-valid 候选 |
@@ -543,14 +558,14 @@ v5.2 的一半，六版式在 delta=6 时仍全部 `mac=OK(验签)`，delta=4 �
 
 ### 单元测试
 
-`swift test` 覆盖 62 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+`swift test` 覆盖 65 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
 JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
 tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
 layout v4 回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
 block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
 PageRegistry / PageNameCodec。
 
-`python3 tools/test_bwdecode.py` 另有 124 项检查，并在同一张 PNG 上与 Swift 版对账。
+`python3 tools/test_bwdecode.py` 另有 158 项检查，并在同一张 PNG 上与 Swift 版对账。
 
 ### 模拟器逐页实测
 
@@ -646,11 +661,11 @@ xcrun simctl io booted screenshot /tmp/shot.png
 `.github/workflows/ci.yml` 对每个 PR 跑四件事：
 
 1. `swift build`（全 target 编译）
-2. `swift test`（62 例核心测试）
+2. `swift test`（65 例核心测试）
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
    编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
    编不到那部分。
-4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码 / 黑边，124 项）
+4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码 / 黑边 / 比例尺，158 项）
    并与 Swift 版 `bwdecode` 在同一张 PNG 上对账。
 
 本地复现：

@@ -60,6 +60,16 @@ Demo/sweep.sh [UDID] [delta] [luma|chroma] [v4|v52]   # 逐页截图解码对比
 - chroma delta 必须按预乘 alpha 的整层 RGBA 合成验证，不能把 `delta` 当作简单的 chroma 加法；pilot 与 data 联合生成时 alpha 保持恒定。
 - **可见性只有亮度轴被陪色匹配掉，色度轴极差 = `delta`**：实测 delta=8 时 ΔB=−8/255、ΔLuma=0.35/255，2.67pt 棋盘格在纯色页上看得见。v5.2 观测余量是 v4 的两倍，默认 `delta` 取 4（模拟器六版式 `correctedBits=0`）；v4 保持历史默认 8，要更淡用 6。改默认 delta 必须重新实测并同步 README 中英 / 接入 skill，并重跑真机 + 最暗页面可见性验收，不许只改代码。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
+- **黑边裁剪是 CLI 契约，两端必须同义**：`Sources/BlindWatermarkCore/BorderTrim.swift` 的
+  `trimmingUniformDarkBorder` 与 `tools/bwdecode.py` 的 `trim_uniform_dark_border` 共享同一组
+  `BorderTrimHeuristic` 阈值（近黑 32 / 覆盖率 0.90 / 单边上限 25% / 内侧探针 ≥96 且占比 0.30）。
+  自动路径先裁再解，输出行加 `trim=(左,上,右,下)`，`phase` 随之相对裁剪后的图；显式 `--offset`
+  时不裁。改阈值必须同时改两端 + 补"深色页留白不裁"的测试。
+- **比例尺粗定位是 v5.2 搜索的第一层，两端同义**：`ScaleRuler.swift` 与 `tools/bwdecode.py` 的
+  `estimate_scale_ruler` 用同一套阈值（置信 ≥0.05、候选 ±10% / 5 档、block 搜索 3.5~13px）。
+  粗筛必须按**比例**排名（每个 (plane, sync, scale) 只留最高分的相位），否则同一比例的上百个相位会
+  挤满 top-N，非粗网格比例（0.837 / 1.173）进不了精搜 —— 这条有回归测试钉住，不许改回去。
+  比例尺只是粗定位：快路径失败必须退回完整 21 档网格。
 - **改解码逻辑要同步两处**：v4 的 `Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
   是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码、校验阶梯）。
   v5.2 的 `V52Codec.swift` 与其 Python 镜像也必须同步；改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。

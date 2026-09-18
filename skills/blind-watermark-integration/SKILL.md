@@ -102,6 +102,10 @@ swift build -c release
 .build/release/bwdecode shot-v52.png --protocol v5.2 --auto --layout
 ```
 
+被缩放过的截图（IM 转发会按宽高比重采样）必须让 v5.2 走 `--auto`：解码端会先用**比例尺**读水印的
+块周期、估出 scale（10~50ms，置信不足或快路径失败自动退回完整网格），再在候选附近精搜。
+v4 没有 scale 搜索，缩放图在 v4 下必然解不出 —— 这种场景只能迁到 v5.2。
+
 v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 和 `--dump-codes`；它没有 HMAC，也不使用 v4 的
 15 字符页面注册表，`--offset` 也不接受负值（相位由解码器自己搜索）。自动缩放只在 0.50...1.50 的
 粗网格上启动，再用 fractional rectangle averaging

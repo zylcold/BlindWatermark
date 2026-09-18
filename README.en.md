@@ -464,9 +464,24 @@ conditions are recorded separately.
 #### 5. Fractional rectangle averaging and uniform-scale search
 
 **Principle.** The decoder builds an integral image for each feature plane and uses rectangle means with
-fractional boundaries to model a resized block, instead of rounding the scale to an integer block. `decodeBest`
-first ranks a 0.50...1.50 coarse grid at 0.05 steps, then refines local winners while rechecking block phase
-and tile-index shifts, and only then enters BCH/CRC decoding.
+fractional boundaries to model a resized block, instead of rounding the scale to an integer block.
+
+Before the grid search, a **scale ruler** runs first: the watermark alternates `[block, !block]` pairs
+along x, so its horizontal autocorrelation is most negative at `lag = block` and most positive at
+`lag = 2*block`. A joint "valley + doubled peak" objective interpolated on a fine grid reads the block
+length in 10–50 ms (`scale = block / 8`), and only five candidates within ±10% of that ratio are searched
+instead of 21 scales × 2 planes. Confidence is the valley depth (measured 0.30–0.74 on watermarked
+images, ≈0.00 on flat or noisy images without a watermark); a weak hint or a failed fast path **falls
+back to the full grid**, so behaviour matches the previous release. Measured accuracy: exact at 0.50 /
+0.75 / 1.00 / 1.50, within 1.3% at 1.173 / 1.30, 4.5% at 0.837, 7.6% on a WeChat Work forwarded
+screenshot — hence the ±10% candidates plus local refinement (`estimatedScale` is the refined value).
+
+The coarse stage also ranks **scales**, not individual contexts: one scale has hundreds of phases, and
+ranking contexts lets them fill the top-16, which kept unlisted ratios (such as 1.173) out of the
+refinement stage. That was the "`--scale 1.173` decodes but the default grid does not" bug; all seven
+ratios 0.50...1.50 now decode from the CLI. The fallback grid is still a continuous 0.50...1.50 sweep at
+0.05 steps, which then refines local winners while rechecking block phase and tile-index shifts, and only
+then enters BCH/CRC decoding.
 
 **Strengths.** The scale need not be a hard-coded whitelist: 0.50, 0.837, 1.173, and 1.50, plus small arbitrary
 crop offsets, were recovered under the experiment conditions. Cheap statistics filter geometry contexts before
@@ -577,7 +592,10 @@ synthetic grey background, chroma, alpha=8, tiled PNG; timing includes the state
 | pilot | `.pn` / `.separated` under the same conditions | payload equal; both pilot scores about 0.995 (diagnostic only) |
 | resize | nearest-generated 0.50 / 0.837 / 1.173 / 1.50 images with scale supplied | 4/4 payloads equal |
 | unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | release about 0.66 s (debug 11.7 s), estimated scale 0.8358, payload equal |
-| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s in release, payload equal |
+| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s → **1.22 s** with the scale ruler, payload equal |
+| unlisted ratios | 0.50 / 0.75 / 0.837 / 1.0 / 1.173 / 1.3 / 1.5, `--protocol v5.2 --auto` | 7/7 payloads equal, `estimatedScale` within 0.4% (ruler hint within 8%) |
+| forwarded resized shot | WeChat Work forwarded 0.8134-scale image plus black border | decoded in 1.35 s, `minObs` 13 → 40 |
+| v4 image via `--protocol auto` | 1179×2556 | 7.7 s → 8.9 s (fixed cost of the ruler plus the 5-scale fast path, then falls back to v4) |
 | evidence floor | 320×320 small image (`minObs=2`/bit) | `TOO_SMALL`, `--layout` refused (exit 1 in both implementations) |
 | crop | 9 px left and 13 px top, unknown phase/tile shift | payload equal, one candidate |
 | negative | 640×900 plain image | no CRC-valid candidate |
@@ -617,7 +635,7 @@ device + darkest-page visibility pass from the integration skill.
 
 ### Unit tests
 
-`swift test` covers 62 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+`swift test` covers 65 cases (runs on macOS, no simulator needed): pure white / pure black / mid
 grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
 (vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
 watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
@@ -627,7 +645,7 @@ near-copy aliases being rejected by the self-check but not by the structural che
 restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
 PageRegistry / PageNameCodec.
 
-`python3 tools/test_bwdecode.py` adds 124 checks and cross-checks against the Swift binary on the
+`python3 tools/test_bwdecode.py` adds 158 checks and cross-checks against the Swift binary on the
 same PNG.
 
 ### Per-page simulator measurements
@@ -750,12 +768,12 @@ Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun s
 `.github/workflows/ci.yml` runs four things on every PR:
 
 1. `swift build` (all targets compile)
-2. `swift test` (62 core test cases)
+2. `swift test` (65 core test cases)
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
    `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
    `swift test` cannot reach on macOS.
 4. `python3 tools/test_bwdecode.py`: Python decoder self-check (v4/v5.2 synthetic round trip,
-   cropping, resizing, tamper detection, page codes, borders; 124 checks) cross-checked against the Swift
+   cropping, resizing, tamper detection, page codes, borders, scale ruler; 158 checks) cross-checked against the Swift
    `bwdecode` on the same PNG.
 
 Reproduce locally:
