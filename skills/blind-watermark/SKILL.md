@@ -71,12 +71,19 @@ fractional rectangle averaging。它只覆盖等比缩放和裁剪，不覆盖�
 
 `.none` 是默认导频档；`.pn` / `.separated` 只用于实验测量。当前实现的导频在恒定 alpha 的单层 tile
 里加入公共亮度方向调制，会留下可测的 luma 残差，因此不能宣称不可见，也不能替代 P3/sRGB/OLED 人工验收。
+导频只作用于 `--plane chroma`：`--plane luma` 下的亮度通道全给数据用，不写导频，`pilotScore` 无意义
+（CLI 会就此打警告）。
 只有 `--protocol v5.2` 会启用 `--pilot`；v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 或
-`--dump-codes`，因为它没有 HMAC，也不使用 v4 的 15 字符注册表。
+`--dump-codes`，因为它没有 HMAC，也不使用 v4 的 15 字符注册表；`--offset` 也不接受负值（相位由解码器
+自己搜索，负相位会被直接拒绝）。
 
 v5.2 第一行输出包含 `protocol=v5.2`、payload、`plane`、`pilot`、`phase`、`scale`、
-`correctedBits`、`softRecovery`、`pilotScore` 与 `candidateCount`；`--layout` 第二行给出紧凑字段和
-`crcStatus=OK`。Python 镜像支持相同参数：`python3 tools/bwdecode.py ...`；修改 v5.2 编解码时必须同时
+`correctedBits`、`softRecovery`、`pilotScore`、`candidateCount`，加上证据档 `minObs` / `avgObs` /
+`|z|中位` 与 `OK(...)` / `TOO_SMALL(...)` 裁决；`--layout` 第二行给出紧凑字段和
+`crcStatus=OK(完整性自检,未验签)`。**v5.2 没有 HMAC**：CRC24 只是完整性自检，措辞里不会出现 `mac=`，
+也不许把它讲成验签。证据门槛与 v4 同一把尺（每 bit 观测 ≥ 5 次）：低于门槛时输出 `TOO_SMALL(...)`，
+加 `--layout` 直接 exit 1 拒答 —— 图小的时候优先让用户发原图，不要拿解出的字段去做溯源结论。
+Python 镜像支持相同参数：`python3 tools/bwdecode.py ...`；修改 v5.2 编解码时必须同时
 更新 `Sources/BlindWatermarkCore/V52Codec.swift` / `V52BCH.swift` 与 `tools/bwdecode.py`，并运行
 `python3 tools/test_bwdecode.py` 做跨语言 PNG 对账。
 
@@ -224,8 +231,9 @@ build 时间: 2026-09-16 17:22（构建方当地墙上时间）
 | `\|z\|中位` / `最弱` | 各 bit 显著度。历史 256 bit + chroma 实测中位 29~161；v4/v5.2 应以当前协议测试为准 |
 | `弱bit` | \|z\| < 3 的 bit 数，**判读就看它** |
 | `uid` / `time` / `page` / `tag` | `--layout` 解出的字段；`page` 是短码，后面带注册表命中或 grep 提示 |
-| `mac` | 校验分档（见下），**判读优先级最高** |
+| `mac` | 校验分档（见下），**判读优先级最高**。v5.2 没有 `mac` 字段，只有 `crcStatus` |
 | 末尾判定 | `OK` 弱 bit=0 可信；`WEAK` ≤1/8 弱 bit 要交叉验证；`NO` 大概率没水印；**`TOO_SMALL` 图太小，解码器拒绝解读字段** |
+| v5.2 专用 | `minObs` / `avgObs`（每 bit 最少 / 平均观测数）、`correctedBits`（BCH 纠错位数）、`softRecovery`、`pilotScore`（仅 chroma 导频，仅诊断）、`candidateCount`；**证据看 `minObs`，裁决看行末的 `OK(...)` / `TOO_SMALL(...)`** |
 
 校验分档（`--layout` 第二行末尾）：
 
@@ -253,8 +261,10 @@ python3 "$BW_REPO/tools/bwdecode.py" shot.png --auto --layout --pages pages.json
 ### 标准排查流程
 
 1. **先看判定里有没有 `TOO_SMALL`**：图太小或图案已被破坏（每 bit 观测 < 5 次），解码器会拒答。
-   别拿小裁剪图硬解 —— 512 bit 实测需要约 2700 个 pair（整宽 1179 时约 300px 高），
-   482×440 这类小图只有 1.5~3.2 次/bit，必然拒答。让对方发**原图 + 更大范围**。
+   别拿小裁剪图硬解 —— v4 的 512 bit 实测需要约 2700 个 pair（整宽 1179 时约 300px 高），
+   482×440 这类小图只有 1.5~3.2 次/bit，必然拒答；v5.2 的 256 bit 码字只要约 1280 个 pair
+   （整宽 1179 时约 150px 高），同一张 300×300 小图实测只有 2.6 次/bit，同样拒答。
+   让对方发**原图 + 更大范围**。
 2. **看病灶在哪一层**：`mac` 是哪个档（有没有校验值）+ 图有没有被裁过。
    `自检` / `验签` 档被裁过也能解；`未签名` / `未校验` 且被裁过 → 走上面的语义一致性兜底，并标注未验签。
 3. 看判定：`NO` → 画面里大概率没水印（系统界面、别的 App）；`WEAK` → 必须结合日志/用户描述交叉验证。

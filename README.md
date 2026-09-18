@@ -460,23 +460,32 @@ Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
 // 换页时：Watermark.updateV52(payload: nextPayload)
 ```
 
-CLI 第一行输出 v5.2 的 `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`, `pilotScore` 与
-`candidateCount`；带 `--layout` 时第二行再输出紧凑字段和 `crcStatus=OK`。旧版 `--auto` 仍是 v4 的
+CLI 第一行输出 v5.2 的 `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`, `pilotScore`,
+`candidateCount`, 证据档 `minObs` / `avgObs` / `|z|中位` 与 `OK(...)` / `TOO_SMALL(...)` 裁决；带 `--layout`
+时第二行再输出紧凑字段和 `crcStatus=OK(完整性自检,未验签)`。v5.2 没有 HMAC，CRC24 只是完整性自检，
+措辞里不出现 `mac=`；证据门槛也没有「带校验值就放行」的例外 —— 每 bit 观测低于 5 次时输出 `TOO_SMALL`
+并**拒绝用 `--layout` 解读字段**（与 v4 同一把尺）。旧版 `--auto` 仍是 v4 的
 相位/平面搜索；迁移期要混合探测时显式使用 `--protocol auto`（先 v5.2，再回退 v4），需要强制旧协议时
 使用 `--protocol v4`。v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 或 `--dump-codes` 参数：它没有
-HMAC，页面字段是 compact code，不能套用 v4 的 15 字符注册表。
+HMAC，页面字段是 compact code，不能套用 v4 的 15 字符注册表；`--offset` 也不接受负值（相位由解码器
+自己按 0...block 搜索，负相位会被直接拒绝，与 Python 端一致）。
 
-`V52SyncMode.pn` 与 `.separated` 是实验导频档，默认 `.none`。它们在固定 alpha 的单层 tile 里加入低幅度
-的左右亮度方向调制，以便测量 PN 相关性；该实验会留下可量化亮度残差，不能称为不可见，也没有替代人工
-P3/sRGB/OLED 验收。chroma data 与 pilot 必须联合生成，delta 是预乘 alpha 的 RGBA 源层幅度，不能按简单
+`V52SyncMode.pn` 与 `.separated` 是实验导频档，默认 `.none`。导频只作用于 `--plane chroma`：luma 平面
+把亮度通道全部用于数据，此时不写入导频、`pilotScore` 无意义，CLI 会就此打警告。导频在固定 alpha 的单层
+tile 里加入低幅度的左右亮度方向调制，以便测量 PN 相关性；该实验会留下可量化亮度残差，不能称为不可见，
+也没有替代人工 P3/sRGB/OLED 验收。chroma data 与 pilot 必须联合生成，delta 是预乘 alpha 的 RGBA 源层幅度，不能按简单
 chroma 加法理解。
+
+`payloadProvider` 只服务零接入的 v4 默认载荷：v5.2 的载荷由 `installV52` / `updateV52` 给出，时间戳在
+install 时固定，需要新时间就得自己再调一次 `updateV52`。
 
 等比缩放路径使用 fractional rectangle averaging。默认自动搜索是 0.50...1.50、步长 0.05 的连续粗网格，
 然后对入围比例做细化，步长继续缩小到不大于 `0.5 / max(width,height)`，并重新检查局部 phase；0.837 和
 1.173 这类不在粗网格中的比例属于实验覆盖，不构成所有图片/重采样器的保证。当前只覆盖等比缩放，旋转/透视、
 拍屏、IM 二次压缩仍是非目标。
 
-本机可复现的首版实验（Swift 6.3.3，macOS Command Line Tools，640×900 合成灰底，chroma，alpha=8，
+本机可复现的首版实验（Swift 6.3.3，macOS Command Line Tools，`swift build -c release`（debug 构建下同一
+搜索慢约 20 倍，不要拿 debug 数字对比），640×900 合成灰底，chroma，alpha=8，
 PNG，数据 tile 平铺；时间包含相应的搜索参数）：
 
 | 路径 | 条件 | 结果 |
@@ -484,9 +493,14 @@ PNG，数据 tile 平铺；时间包含相应的搜索参数）：
 | baseline | phase=(3,5)，`sync=none`，tile rotation 搜索 | payload 一致，`correctedBits=0`，1 个候选 |
 | pilot | 同上，`.pn` / `.separated` | payload 一致；pilot score 均约 0.995（仅诊断） |
 | resize | nearest 生成的 0.50 / 0.837 / 1.173 / 1.50 倍图，比例显式给出 | 4/4 payload 一致 |
-| 未列比例搜索 | 0.837，`--protocol v5.2 --auto` 默认粗网格 + 局部精搜 | 约 0.66 s，估计 scale 0.8358，payload 一致 |
+| 未列比例搜索 | 0.837，`--protocol v5.2 --auto` 默认粗网格 + 局部精搜 | release 约 0.66 s（debug 11.7 s），估计 scale 0.8358，payload 一致 |
+| 整屏搜索 | 1179×2556，`--protocol v5.2 --auto` | release 3.9 s，payload 一致 |
+| 证据门槛 | 320×320 小图（`minObs=2` /bit） | `TOO_SMALL`，拒绝 `--layout`（两端 exit 1） |
 | 裁剪 | 左 9 px、上 13 px，未知 phase/tile rotation | payload 一致，1 个候选 |
 | 负样本 | 640×900 无水印纯色图 | 无 CRC-valid 候选 |
+| 模拟器全量 | iPhone 16（iOS 18.6）模拟器 1179×2556 截图，Demo 六个版式，`--protocol v5.2 --auto` | 6/6 payload 一致，`correctedBits=0`，`candidateCount=1`，最少 76 次/bit |
+| 模拟器裁剪 | 同一张截图左 24 px / 上 137 px | payload 一致，phase=(8,7) |
+| 模拟器小图 | 同一张截图裁到 300×300 | `TOO_SMALL`，拒绝 `--layout`（exit 1） |
 
 上述结果是合成 PNG 上的协议/几何验证，不代表真机、JPEG、P3/sRGB、OLED 可见性或 IM 转发通过；Demo 真机与
 人工可见性仍需在有 Xcode 和设备的环境中补测。
@@ -495,14 +509,14 @@ PNG，数据 tile 平铺；时间包含相应的搜索参数）：
 
 ### 单元测试
 
-`swift test` 覆盖 55 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+`swift test` 覆盖 59 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
 JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
 tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
 layout v4 回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
 block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
 PageRegistry / PageNameCodec。
 
-`python3 tools/test_bwdecode.py` 另有 102 项检查，并在同一张 PNG 上与 Swift 版对账。
+`python3 tools/test_bwdecode.py` 另有 115 项检查，并在同一张 PNG 上与 Swift 版对账。
 
 ### 模拟器逐页实测
 
@@ -543,6 +557,7 @@ delta 更小时更差）。luma 只能配更小的载荷，且要先跑 `Demo/sw
 ```bash
 cd Demo && ./sweep.sh                          # 默认 chroma 逐页扫
 cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 找余量
+cd Demo && ./sweep.sh "" "" chroma v52         # v5.2 协议逐页扫（BW_PROTOCOL=v52 + --protocol v5.2 --auto）
 ```
 
 ### 已知边界
@@ -553,6 +568,11 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 
   （整宽约 300px 高，或整屏 1179×2556）。低于这条线时解码器输出 `TOO_SMALL(...)`
   并且**拒绝用 --layout 解读字段**（退化成"输出看着正常的垃圾"是不允许的）——
   实测 482×440 的小裁剪只有 1.5~3.2 次/bit，必然拒答。
+- **v5.2 同一把尺，而且没有例外**：256 bit 码字（每 byte 在 tile 内有两份反极性副本，观测按码字 bit
+  折叠）实测 320×320 只有 **2 次/bit**、1179×2556 是 **平均 91 次 / 最少 76 次**/bit；下限同样取
+  **5 次/bit**，折合约 **1280 个 pair**（整宽 1179 约 150px 高）。CRC24 只是完整性自检、不是验签，
+  所以 v5.2 **没有** v4 那种「载荷带校验值就不限观测数」的例外：低于门槛一律输出 `TOO_SMALL(...)`
+  并拒绝 `--layout` 解读字段（两端 CLI 同样 exit 1）。
 - **layout v3（256 bit / 32 字节）已废弃**：字段边界变了，历史 v3 截图用本版本解不出来 ——
   这是显式的破坏性变更。需要继续读老图的话，请用 1.0.0 tag 的解码器。
 
@@ -587,11 +607,11 @@ xcrun simctl io booted screenshot /tmp/shot.png
 `.github/workflows/ci.yml` 对每个 PR 跑四件事：
 
 1. `swift build`（全 target 编译）
-2. `swift test`（55 例核心测试）
+2. `swift test`（59 例核心测试）
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
    编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
    编不到那部分。
-4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码，102 项）
+4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码，115 项）
    并与 Swift 版 `bwdecode` 在同一张 PNG 上对账。
 
 本地复现：

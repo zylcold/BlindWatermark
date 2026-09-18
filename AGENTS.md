@@ -31,7 +31,7 @@ swift run bwdecode shot.png --layout --key <hex> --pages Demo/pages.json
 swift run bwdecode shot.png --protocol v5.2 --layout --scale 0.837
 swift run bwdecode shot.png --auto --layout       # 历史 v4 相位/平面搜索
 swift run bwdecode shot.png --protocol auto --layout  # 显式混合探测：先 v5.2，再回退 v4
-Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比，需 xcodegen + 已启动模拟器
+Demo/sweep.sh [UDID] [delta] [luma|chroma] [v4|v52]   # 逐页截图解码对比，需 xcodegen + 已启动模拟器
 ```
 
 ## 硬约束
@@ -55,7 +55,8 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
   `Watermark.installV52` / `--protocol v5.2` 才启用，默认渲染与历史解码仍走 v4。
 - v5.2 的时间字段是 UTC 2026-01-01 起的秒/分钟偏移；base37 字母表为 `a-z0-9_`，首字符为高位 radix digit，固定宽度右侧 `_` 补齐且解码去掉尾部补位；非法 radix 值、profile、reserved 或 CRC 必须拒绝。
 - v5.2 的 256 bit 码字在每个 256 px tile 中重复两次且业务极性相反；`V52Codec` 的有限 Chase 只在低可靠位上尝试最多 12 位、2 次翻转，并收集全部 CRC-valid 候选后去重，不能遇到首个 CRC 通过就返回。CRC 仅是完整性检查，不是验签。
-- v5.2 的 `V52SyncMode.pn/separated` 是 pilot 实验档，默认 `.none`；实验档的公共亮度调制会记录亮度残差，不得宣称不可见或已通过人工验收。缩放搜索为 0.50...1.50 连续粗网格加图像跨度相关的局部精搜，0.837/1.173 等比例必须作为未列入粗网格的测试。
+- **v5.2 的证据门槛与 v4 同一把尺（每 bit 观测 ≥ 5 次），且没有「带校验值就放行」的例外**：CRC24 只是完整性自检，不是验签。`V52Codec.Decoded.hasSufficientEvidence` 低于门槛时，CLI 必须输出 `TOO_SMALL(...)` 并把 `minObs` / `avgObs` / `|z|中位` 打进第一行；带 `--layout` 一律 exit 1 拒答，不带 `--layout` 只警告不解读字段。输出里不得出现 `mac=`（v5.2 没有 HMAC），CRC 档写作 `crcStatus=OK(完整性自检,未验签)`。
+- v5.2 的 `V52SyncMode.pn/separated` 是 pilot 实验档，默认 `.none`，且**只作用于 chroma**（luma 平面把亮度通道全给数据，此时不写导频、`pilotScore` 无意义，CLI 要打警告）；实验档的公共亮度调制会记录亮度残差，不得宣称不可见或已通过人工验收。缩放搜索为 0.50...1.50 连续粗网格加图像跨度相关的局部精搜，0.837/1.173 等比例必须作为未列入粗网格的测试。裁剪搜索不接受负 `--offset`（两端一致返回 nil），相位由解码器自己搜索。
 - chroma delta 必须按预乘 alpha 的整层 RGBA 合成验证，不能把 `delta` 当作简单的 chroma 加法；pilot 与 data 联合生成时 alpha 保持恒定。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
 - **改解码逻辑要同步两处**：v4 的 `Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`

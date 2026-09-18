@@ -71,7 +71,12 @@ CRC 只做完整性检查，不能代替服务端签名或证明 uid 未被伪�
 
 v5.2 默认 `sync: .none`。`.pn` / `.separated` 是实验导频档：当前实现为恒定 alpha 的单层 RGBA tile
 加入公共亮度方向调制，会留下 luma 残差，不能宣传为不可见，也不能跳过 P3/sRGB/OLED 的人工验收。
+导频只作用于 `plane: .chroma`：luma 平面把亮度通道全给数据用，此时不写导频、`pilotScore` 无意义
+（解析端 CLI 会打警告）。
 数据与导频必须一起由 `V52Codec.makeTile` 生成，`delta` 是预乘 alpha 源层幅度，不是简单的 chroma 加法。
+
+v5.2 不走 `Watermark.payloadProvider`（那是零接入 v4 默认载荷的入口）：载荷由 `installV52` 给出，
+时间戳在 install 时就固定了；需要新的时间戳就自己再调一次 `updateV52`（例如回前台或换页时）。
 
 解析端显式使用：
 
@@ -83,9 +88,11 @@ swift build -c release
 ```
 
 v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 和 `--dump-codes`；它没有 HMAC，也不使用 v4 的
-15 字符页面注册表。自动缩放只在 0.50...1.50 的粗网格上启动，再用 fractional rectangle averaging
+15 字符页面注册表，`--offset` 也不接受负值（相位由解码器自己搜索）。自动缩放只在 0.50...1.50 的
+粗网格上启动，再用 fractional rectangle averaging
 局部精搜；只保证等比缩放和裁剪，不覆盖旋转、透视、拍屏或聊天软件二次压缩。`candidateCount` 大于 1
-且输出 `ambiguous` 时必须停止解读，保留原图并交由上游处理。
+且输出 `ambiguous` 时必须停止解读，保留原图并交由上游处理。**观测证据看第一行的 `minObs`**：低于 5 次/bit
+时解码器输出 `TOO_SMALL(...)` 并拒绝 `--layout`（验收时遇到这种情况要回到更完整的截图重跑，而不是把字段当结论）。
 
 **校验值有两档，都在同一个字段里**：
 
@@ -170,6 +177,7 @@ a=8 时 p 正好取整到 1，两条色的亮度几乎完全相等 —— 实测
 ```bash
 cd Demo && ./sweep.sh "<模拟器UDID>"        # 逐页扫，默认 chroma
 cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
+cd Demo && ./sweep.sh "" "" chroma v52      # v5.2 逐页扫（第 4 个参数选协议，默认 v4）
 ```
 
 换成自己的版式后**必须重测，别照抄 README 的数字**。验收清单：
@@ -184,8 +192,9 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
    必须能读出 uid / build / note，并且 `mac` 不是 `未签名`/`未校验` ——
    这两档意味着裁过的图将来解不出来
 7. 若接入的是 v5.2，改跑
-   `bwdecode shot-v52.png --protocol v5.2 --auto --layout`，确认 `crcStatus=OK`、`candidateCount=1`，
-   并把 `scale` / `phase` / `correctedBits` 记录到验收单；CRC 通过不是防伪证明。
+   `bwdecode shot-v52.png --protocol v5.2 --auto --layout`，确认 `crcStatus=OK(完整性自检,未验签)`、
+   `candidateCount=1` 且 `minObs ≥ 5`，并把 `scale` / `phase` / `correctedBits` / `minObs` 记录到
+   验收单；CRC 通过只证明完整性与“解对了”，**不是防伪证明**（v5.2 没有 HMAC，输出里不会出现 `mac=`）。
 8. pilot 用 `.pn` / `.separated` 时必须单独记录亮度残差并做 P3/sRGB/OLED 人工检查，不得以导频
    相关性分数代替可见性结论。
 9. 截图通道确认：解析依赖**设备像素原图**。图片消息通道会重编码/缩放（企业微信 `_HD/` 里存的是
@@ -204,6 +213,8 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma       # 换平面 / 指定 delta 找余量
 | v5.2 解码成 v4 垃圾字段 | 未显式传 `--protocol v5.2`；迁移期间用 `--protocol auto`，稳定接入后固定协议 |
 | v5.2 报 `ambiguous` | 多个 CRC-valid 候选同时存在；保留原图、不要手选，检查 phase / scale / tile 覆盖 |
 | v5.2 pilot 很容易看见 | `.pn` / `.separated` 是亮度残差实验；先退回 `.none`，再按人工可见性流程复测 |
+| v5.2 报 `TOO_SMALL` | 截图太小 / 被裁得太狠（每 bit 观测 < 5 次）；让上报方发完整原图，不要用解出的字段下结论 |
+| v5.2 的 `pilotScore` 看着像噪声 | 导频只作用于 `plane: .chroma`；luma 平面下这个值是没意义的，改用 chroma 或退回 `.none` |
 
 ## 六、合规
 

@@ -520,16 +520,25 @@ Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
 ```
 
 The first v5.2 CLI line reports `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`,
-`pilotScore`, and `candidateCount`; with `--layout`, the second line adds compact fields and
-`crcStatus=OK`. The historical bare `--auto` keeps its v4 phase/plane search. For migration, opt in to
+`pilotScore`, `candidateCount`, the evidence fields `minObs` / `avgObs` / `|z| median`, and an
+`OK(...)` / `TOO_SMALL(...)` verdict; with `--layout`, the second line adds compact fields and
+`crcStatus=OK(完整性自检,未验签)`. v5.2 has no HMAC: CRC24 is an integrity self-check only, the wording
+never says `mac=`, and the evidence floor has no "signed payload exception" — below 5 observations per
+bit the decoder prints `TOO_SMALL` and **refuses `--layout`** (same bar as v4). The historical bare
+`--auto` keeps its v4 phase/plane search. For migration, opt in to
 mixed detection with `--protocol auto` (v5.2 first, then v4); use `--protocol v4` to force the historical
 protocol. v5.2 rejects v4 `--bits`, `--key`, `--pages`, and `--dump-codes`: it has no HMAC and its
-eight-character compact page code cannot be looked up by the v4 fifteen-character registry.
+eight-character compact page code cannot be looked up by the v4 fifteen-character registry; negative
+`--offset` is rejected too (the decoder searches phases 0...block itself, matching the Python mirror).
 
-`V52SyncMode.pn` and `.separated` are pilot experiment modes; `.none` is the default. They add a small
+`V52SyncMode.pn` and `.separated` are pilot experiment modes; `.none` is the default. The pilot only
+affects `--plane chroma`: the luma plane spends the whole brightness channel on data, so no pilot is
+written there, `pilotScore` is meaningless, and the CLI warns about it. The pilot adds a small
 left/right brightness-direction modulation to a constant-alpha, single-layer tile for correlation
 measurement. The experiment leaves measurable luma residual and has no manual P3/sRGB/OLED visibility
-approval. Chroma data and pilot are generated jointly; delta is a premultiplied-alpha RGBA source-layer
+approval. `payloadProvider` only serves the zero-touch v4 default payload: v5.2 payloads come from
+`installV52` / `updateV52`, their timestamp is frozen at install time, and a fresh timestamp needs
+another `updateV52` call. Chroma data and pilot are generated jointly; delta is a premultiplied-alpha RGBA source-layer
 amplitude, not a simple chroma addition.
 
 The resize path uses fractional rectangle averaging. Automatic search covers a continuous 0.50...1.50
@@ -539,17 +548,23 @@ outside the coarse grid and are experimental coverage, not a guarantee for every
 Only uniform scale is covered; rotation, perspective, camera capture, and messenger recompression remain
 out of scope.
 
-Reproducible first-pass measurements (Swift 6.3.3, macOS Command Line Tools, 640×900 synthetic grey
-background, chroma, alpha=8, tiled PNG; timing includes the stated search):
+Reproducible first-pass measurements (Swift 6.3.3, macOS Command Line Tools, `swift build -c release`
+(the same search is about 20× slower in a debug build, so do not compare debug timings), 640×900
+synthetic grey background, chroma, alpha=8, tiled PNG; timing includes the stated search):
 
 | Path | Condition | Result |
 | --- | --- | --- |
 | baseline | phase=(3,5), `sync=none`, tile-shift search | payload equal, `correctedBits=0`, one candidate |
 | pilot | `.pn` / `.separated` under the same conditions | payload equal; both pilot scores about 0.995 (diagnostic only) |
 | resize | nearest-generated 0.50 / 0.837 / 1.173 / 1.50 images with scale supplied | 4/4 payloads equal |
-| unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | about 0.66 s, estimated scale 0.8358, payload equal |
+| unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | release about 0.66 s (debug 11.7 s), estimated scale 0.8358, payload equal |
+| full-screen search | 1179×2556, `--protocol v5.2 --auto` | 3.9 s in release, payload equal |
+| evidence floor | 320×320 small image (`minObs=2`/bit) | `TOO_SMALL`, `--layout` refused (exit 1 in both implementations) |
 | crop | 9 px left and 13 px top, unknown phase/tile shift | payload equal, one candidate |
 | negative | 640×900 plain image | no CRC-valid candidate |
+| simulator E2E | 1179×2556 iPhone 16 (iOS 18.6) simulator screenshot, six Demo layouts, `--protocol v5.2 --auto` | 6/6 payloads equal, `correctedBits=0`, `candidateCount=1`, 76 minimum observations/bit |
+| simulator crop | same screenshot minus 24 px left / 137 px top | payload equal, phase=(8,7) |
+| simulator floor | 300×300 crop of the same screenshot | `TOO_SMALL`, `--layout` refused (exit 1) |
 
 These are synthetic PNG protocol/geometry measurements. They do not establish device, JPEG, P3/sRGB,
 OLED-visibility, or messenger acceptance; the Demo and manual visibility pass still require Xcode and a
@@ -559,7 +574,7 @@ device.
 
 ### Unit tests
 
-`swift test` covers 55 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+`swift test` covers 59 cases (runs on macOS, no simulator needed): pure white / pure black / mid
 grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
 (vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
 watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
@@ -569,7 +584,7 @@ near-copy aliases being rejected by the self-check but not by the structural che
 restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
 PageRegistry / PageNameCodec.
 
-`python3 tools/test_bwdecode.py` adds 102 checks and cross-checks against the Swift binary on the
+`python3 tools/test_bwdecode.py` adds 115 checks and cross-checks against the Swift binary on the
 same PNG.
 
 ### Per-page simulator measurements
@@ -628,6 +643,7 @@ of copying these numbers:
 ```bash
 cd Demo && ./sweep.sh                          # chroma sweep over all pages (default)
 cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin at a given delta
+cd Demo && ./sweep.sh "" "" chroma v52         # sweep the v5.2 protocol (BW_PROTOCOL=v52 + --protocol v5.2 --auto)
 ```
 
 ### Known limits
@@ -639,6 +655,12 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin 
   1179×2556 screen). Below that the decoder prints `TOO_SMALL(...)` and **refuses to interpret fields
   with --layout** (degrading to "looks fine but is garbage" is not allowed) — a 482×440 crop measures
   1.5–3.2 observations per bit and is always refused.
+- **v5.2 uses the same bar, with no exception**: the 256-bit codeword (two opposite-polarity copies per
+  tile, folded back onto the codeword bits) measured **2 observations/bit** on a 320×320 image and
+  **90.9 average / 76 minimum** on a real 1179×2556 simulator screenshot; the floor is again
+  **5 observations per bit**, about **1280 pairs** (≈150 px tall at full width). CRC24 is an integrity
+  self-check, not a signature, so v5.2 has **no** "payload carries a check value, so observations do not
+  matter" exception: below the floor it prints `TOO_SMALL(...)` and refuses `--layout` (exit 1).
 - **layout v3 (256 bit / 32 bytes) is deprecated**: field boundaries changed, so historical v3
   screenshots no longer decode — an explicit breaking change. To read older images, use the decoder
   from the 1.0.0 tag.
@@ -677,12 +699,12 @@ Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun s
 `.github/workflows/ci.yml` runs four things on every PR:
 
 1. `swift build` (all targets compile)
-2. `swift test` (55 core test cases)
+2. `swift test` (59 core test cases)
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
    `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
    `swift test` cannot reach on macOS.
 4. `python3 tools/test_bwdecode.py`: Python decoder self-check (v4/v5.2 synthetic round trip,
-   cropping, resizing, tamper detection, page codes; 102 checks) cross-checked against the Swift
+   cropping, resizing, tamper detection, page codes; 115 checks) cross-checked against the Swift
    `bwdecode` on the same PNG.
 
 Reproduce locally:
