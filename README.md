@@ -106,7 +106,7 @@ Watermark.install(payload: 0xDEAD_BEEF)
 | 构造方式 | 字段内容 | 解码端 |
 |---|---|---|
 | `WatermarkPayload(… key:)` | HMAC-SHA256(前 52 字节, 服务端密钥) | 有密钥 → `mac=OK(验签)`；没密钥 → `mac=未校验(需要 --key)`，**裁剪自愈用不了** |
-| `WatermarkPayload.selfChecked(…)` | SHA-256(前 20 字节) 截断 | 任何人 → `mac=OK(自检,未验签)` |
+| `WatermarkPayload.selfChecked(…)` | SHA-256(前 52 字节) 截断 | 任何人 → `mac=OK(自检,未验签)` |
 | `mac: []` / mac 全 0 | 没有校验值 | `mac=未签名`，裁剪/相位搜索只能退结构自检 |
 
 自检值能拦住"对齐错了几 bit"的近似解（实测全搜索空间假阳性 0），但**拦不住伪造**（谁都能算）；
@@ -194,7 +194,7 @@ swift build -c release
 | `mac` 全 0（没带校验值，退结构自检） | 19/20（近似解漏网） |
 | HMAC 签名但拿不到密钥 | 解不了（没校验器）—— 拿密钥或让接入端同时填自检值 |
 
-`--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 256 / chroma），只穷举
+`--auto-offset` 是它的收窄版：假定 `--bits` / `--plane` 已经给对（默认 512 / chroma），只穷举
 **块网格相位（mod 8）**与 512 tile 平移两个自由度，同样走上面那个三档校验阶梯。
 它与 `--offset` 互斥，与 `--auto` 语义重叠（同时给会直接报错退出）。
 载荷没带校验值（`mac` 全 0）而调用方又没给 `--key` 时，它没有可靠的裁决器 —— 会打警告并退结构自检，
@@ -303,18 +303,97 @@ v3 的 10 字符会截成 `userprofil`）。15 字符只用 90 bit，字段留�
 的完整 32 bit，timestamp = 当前 Unix 秒，build/pageCode/note 留空，校验值 = **公开自检值**。
 设备哈希不可逆；**上生产必须换成服务端下发并验签的载荷**。
 
+## v5.2 紧凑协议（显式 opt-in）
+
+v5.2 是与 layout v4 并存的新协议，默认接入和默认 CLI 仍使用 v4；只有 `Watermark.installV52` 或
+`bwdecode --protocol v5.2` 才启用。它把 207 bit 信息字段编码为 BCH(255,207,t6)，再追加一位整体偶校验，
+每个 256 px tile 放两份业务极性相反的 256 bit 码字。BCH 最多纠正 6 个 bit 错误；有限 Chase 只在最弱的
+最多 12 个 bit 中尝试至多 2 次翻转，收集全部 CRC-valid 候选并去重，发现不同 payload 同时合法时输出
+`ambiguous`，不会接受第一个 CRC 通过的候选。CRC24 是完整性自检，不是 HMAC 验签。
+
+207 bit 的固定顺序（低位在前）如下：
+
+| 字段 | 位数 | 规则 |
+| --- | ---: | --- |
+| profile | 4 | 固定 `1`，未知值拒绝 |
+| uid | 32 | `UInt32` |
+| timestamp | 31 | UTC 2026-01-01 起的秒偏移 |
+| buildTime | 24 | UTC 2026-01-01 起的分钟偏移 |
+| page | 42 | 8 字符 base37 |
+| app | 14 | `0...9999` |
+| note | 32 | 6 字符 base37 |
+| CRC24 | 24 | `poly=0x864CFB, init=0xB704CE, refin=false, refout=false, xorout=0`，覆盖前 179 bit |
+| reserved | 4 | 固定 0，不纳入 CRC，非零拒绝 |
+
+base37 字符表是 `abcdefghijklmnopqrstuvwxyz0123456789_`，首字符是最高位 radix digit；固定字段右侧用 `_`
+补齐，解码去掉尾部补位，因此结尾的字面 `_` 不可区分。页面沿用 `PageNameCodec` 的归一化后取前 8 个字符；
+note 只接受 `[a-z0-9_]` 且长度不超过 6，不能当作任意 UTF-8 文本。协议向量固定为：
+
+```text
+payload = 8167452371682d01a0dd0a50ffa86faf4a0520236ff49078f702
+bch256  = dbf79d8bb6998167452371682d01a0dd0a50ffa86faf4a0520236ff49078f782
+```
+
+它对应 `uid=0x12345678, timestampOffset=1234567, buildMinuteOffset=89012, page=profile, app=42, note=hotfix`。
+`V52BCH` 的 256 bit 小端码字向量还包括 `message=1`：
+`973cdf85ebc70100000000000000000000000000000000000000000000000080`；该向量由
+`generator=0x1c7eb85df3c97` 生成。
+
+v5.2 接入示例：
+
+```swift
+let payload = WatermarkPayloadV52(
+    uid: uid, timestamp: UInt64(Date().timeIntervalSince1970),
+    buildTime: UInt64(Date().timeIntervalSince1970),
+    pageClassName: "BHProfileViewController", app: 42, note: "hotfix"
+)!
+Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
+// 换页时：Watermark.updateV52(payload: nextPayload)
+```
+
+CLI 第一行输出 v5.2 的 `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`, `pilotScore` 与
+`candidateCount`；带 `--layout` 时第二行再输出紧凑字段和 `crcStatus=OK`。旧版 `--auto` 仍是 v4 的
+相位/平面搜索；迁移期要混合探测时显式使用 `--protocol auto`（先 v5.2，再回退 v4），需要强制旧协议时
+使用 `--protocol v4`。v5.2 不接受 v4 的 `--bits`、`--key`、`--pages` 或 `--dump-codes` 参数：它没有
+HMAC，页面字段是 compact code，不能套用 v4 的 15 字符注册表。
+
+`V52SyncMode.pn` 与 `.separated` 是实验导频档，默认 `.none`。它们在固定 alpha 的单层 tile 里加入低幅度
+的左右亮度方向调制，以便测量 PN 相关性；该实验会留下可量化亮度残差，不能称为不可见，也没有替代人工
+P3/sRGB/OLED 验收。chroma data 与 pilot 必须联合生成，delta 是预乘 alpha 的 RGBA 源层幅度，不能按简单
+chroma 加法理解。
+
+等比缩放路径使用 fractional rectangle averaging。默认自动搜索是 0.50...1.50、步长 0.05 的连续粗网格，
+然后对入围比例做细化，步长继续缩小到不大于 `0.5 / max(width,height)`，并重新检查局部 phase；0.837 和
+1.173 这类不在粗网格中的比例属于实验覆盖，不构成所有图片/重采样器的保证。当前只覆盖等比缩放，旋转/透视、
+拍屏、IM 二次压缩仍是非目标。
+
+本机可复现的首版实验（Swift 6.3.3，macOS Command Line Tools，640×900 合成灰底，chroma，alpha=8，
+PNG，数据 tile 平铺；时间包含相应的搜索参数）：
+
+| 路径 | 条件 | 结果 |
+| --- | --- | --- |
+| baseline | phase=(3,5)，`sync=none`，tile rotation 搜索 | payload 一致，`correctedBits=0`，1 个候选 |
+| pilot | 同上，`.pn` / `.separated` | payload 一致；pilot score 均约 0.995（仅诊断） |
+| resize | nearest 生成的 0.50 / 0.837 / 1.173 / 1.50 倍图，比例显式给出 | 4/4 payload 一致 |
+| 未列比例搜索 | 0.837，`--protocol v5.2 --auto` 默认粗网格 + 局部精搜 | 约 0.66 s，估计 scale 0.8358，payload 一致 |
+| 裁剪 | 左 9 px、上 13 px，未知 phase/tile rotation | payload 一致，1 个候选 |
+| 负样本 | 640×900 无水印纯色图 | 无 CRC-valid 候选 |
+
+上述结果是合成 PNG 上的协议/几何验证，不代表真机、JPEG、P3/sRGB、OLED 可见性或 IM 转发通过；Demo 真机与
+人工可见性仍需在有 Xcode 和设备的环境中补测。
+
 ## 实测与边界
 
 ### 单元测试
 
-`swift test` 覆盖 48 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
+`swift test` 覆盖 55 例（macOS 本机即可跑，不需要模拟器）：纯白/纯黑/中灰底色、渐变 + 照片级细节、
 JPEG q=0.8 与 q=0.6、局部裁剪（纵向 + 横向 + 奇数块偏移）、`delta = 2` 下限、无水印画面不误报、
 tile 几何契约、chroma/luma 两平面各自的可解码性、对抗性色度纹理不静默解错、`--auto` 的相位 / 平面 / 位数自动探测、
 layout v4 回环与校验值（HMAC / 公开自检值 / 未签名三档）判定、近似解必须被自检值拦住、
 block 奇偶档把奇数块裁剪的 `|z|` 拉回偶数块水平、`findBestOffset`（校验器裁决）以及
 PageRegistry / PageNameCodec。
 
-`python3 tools/test_bwdecode.py` 另有 74 项检查，并在同一张 PNG 上与 Swift 版对账。
+`python3 tools/test_bwdecode.py` 另有 102 项检查，并在同一张 PNG 上与 Swift 版对账。
 
 ### 模拟器逐页实测
 
@@ -371,8 +450,8 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # 换 luma 平面 / 指定 delta 
 - **chroma 的对抗样本**：色度结构恰好落在 8px 尺度时会退化。
   `testChromaNeverSilentlyWrongOnAdversarialColorTexture` 兜住底线 —— 这种情况必须解不出或置信度低，
   不允许静默给出错误的 payload。
-- **缩放解不出**：截图被缩放（聊天软件转发压缩、任何 resize）→ 块边长与平铺周期一起变了，完全解不出。
-  只支持原始设备像素分辨率，让用户重发**原图**。
+- **v4 缩放解不出**：v4 截图被缩放（聊天软件转发压缩、任何 resize）→ 块边长与平铺周期一起变了，完全解不出。
+  需要读缩放图时改用 v5.2，并显式传 `--scale` 或 `--protocol v5.2 --auto`；两者都不覆盖聊天软件二次压缩的未知处理。
 - **拍屏解不出**：另一台手机拍屏幕，摩尔纹与几何畸变会让块网格完全歪掉，
   需要同步模板 + 深度学习那一路方案，本仓库不做。
 - **裁剪可以解**：`--auto` 覆盖纵向与横向裁剪（含非整 pair 偏移与奇数块偏移）；
@@ -399,11 +478,11 @@ xcrun simctl io booted screenshot /tmp/shot.png
 `.github/workflows/ci.yml` 对每个 PR 跑四件事：
 
 1. `swift build`（全 target 编译）
-2. `swift test`（48 例核心测试）
+2. `swift test`（55 例核心测试）
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'`
    编译 `Demo/`，覆盖 iOS 侧（UIKit 窗口层、ObjC `+load`）的编译验证 —— `swift test` 在 macOS 上
    编不到那部分。
-4. `python3 tools/test_bwdecode.py`：Python 解码器自检（合成图回环 / 裁剪 / 篡改检测 / 短码）
+4. `python3 tools/test_bwdecode.py`：Python 解码器自检（v4/v5.2 合成图回环 / 裁剪 / 缩放 / 篡改检测 / 短码，102 项）
    并与 Swift 版 `bwdecode` 在同一张 PNG 上对账。
 
 本地复现：

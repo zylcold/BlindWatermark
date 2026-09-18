@@ -122,7 +122,7 @@ The check value lives in the 96-bit `mac` field and has three flavours:
 | Constructed with | Field content | Decoder side |
 |---|---|---|
 | `WatermarkPayload(… key:)` | HMAC-SHA256(first 52 bytes, server key) | with a key → `mac=OK(验签)`; without → `mac=未校验(需要 --key)`, and **crop recovery is unavailable** |
-| `WatermarkPayload.selfChecked(…)` | SHA-256(first 20 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
+| `WatermarkPayload.selfChecked(…)` | SHA-256(first 52 bytes), truncated | anyone → `mac=OK(自检,未验签)` |
 | `mac: []` / all zeros | no check value | `mac=未签名`; cropping search falls back to the structural check |
 
 The self-check catches "alignment was off by a few bits" aliases (measured: zero false positives
@@ -193,12 +193,12 @@ swift build -c release
 .build/release/bwdecode --pages Demo/pages.json --dump-codes
 ```
 
-`--auto` enumerates **2 planes × 64 phases × 512 tile shifts** (bit count defaults to 256 only; a
-different `--bits` is added as a candidate only when passed explicitly) and arbitrates with the
-MAC. Measured at 0.1 s (iPhone 16 screenshot, M1 Pro, release build).
+The historical bare `--auto` keeps the v4 phase/plane search and HMAC/public-self-check arbitration.
+For migration, use the explicit `--protocol auto` spelling to try v5.2 first and then fall back to v4;
+v5.2 uses BCH + CRC candidate collection and never accepts the first CRC-valid candidate.
 
-`--auto-offset` is the narrower version: it assumes `--bits` / `--plane` are already correct
-(256 / chroma by default) and only searches **the block grid phase (mod 8)**. It additionally
+`--auto-offset` is the narrower v4 version: it assumes `--bits` / `--plane` are already correct
+(512 / chroma by default) and only searches **the block grid phase (mod 8)**. It additionally
 enumerates the 512 tile shifts **only when `--key` is given** (MAC arbitration). It is mutually
 exclusive with `--offset` and overlaps `--auto` (passing both exits with an error). Without
 `--key` it can only rank by median `|z|` and **does not guarantee a correct payload** — read the
@@ -339,11 +339,96 @@ timestamp = current Unix seconds, build/pageCode/note empty, and the check field
 self-check value**. The device hash is irreversible; **in production this must be replaced by a
 server-issued, signed payload**.
 
+## v5.2 compact protocol (explicit opt-in)
+
+v5.2 is a separate protocol that coexists with layout v4. The default renderer and historical CLI
+path stay on v4; use `Watermark.installV52` or `bwdecode --protocol v5.2` to opt in. The protocol packs
+207 information bits into BCH(255,207,t6), then adds one even-parity extension bit for a 256-bit
+codeword. Each 256 px tile carries two copies with opposite business polarity. BCH corrects up to six
+bit errors. A bounded Chase pass tries at most two flips among the twelve least reliable bits, collects
+all CRC-valid candidates, deduplicates them, and reports `ambiguous` if different payloads remain.
+CRC is an integrity check, not a signature.
+
+The 207-bit field order is (low bit first):
+
+| Field | Bits | Rule |
+| --- | ---: | --- |
+| profile | 4 | fixed `1`; unknown values are rejected |
+| uid | 32 | `UInt32` |
+| timestamp | 31 | seconds after UTC 2026-01-01 |
+| buildTime | 24 | minutes after UTC 2026-01-01 |
+| page | 42 | eight base37 characters |
+| app | 14 | `0...9999` |
+| note | 32 | six base37 characters |
+| CRC24 | 24 | `poly=0x864CFB, init=0xB704CE, refin=false, refout=false, xorout=0`; covers the first 179 bits |
+| reserved | 4 | fixed zero, outside the CRC, non-zero is rejected |
+
+The base37 alphabet is `abcdefghijklmnopqrstuvwxyz0123456789_`; the first character is the most
+significant radix digit. Fixed fields are right-padded with `_`, which is removed on decode, so a literal
+trailing underscore is not representable. Page names use the existing `PageNameCodec` normalization and
+keep eight characters. Notes accept only `[a-z0-9_]` and at most six characters; they are not arbitrary
+UTF-8 text. Golden vectors are kept in `Tests/BlindWatermarkCoreTests/V52Tests.swift`:
+
+```text
+payload = 8167452371682d01a0dd0a50ffa86faf4a0520236ff49078f702
+bch256  = dbf79d8bb6998167452371682d01a0dd0a50ffa86faf4a0520236ff49078f782
+```
+
+The canonical BCH vector for `message=1` is
+`973cdf85ebc70100000000000000000000000000000000000000000000000080`, using
+`generator=0x1c7eb85df3c97`.
+
+```swift
+let payload = WatermarkPayloadV52(
+    uid: uid, timestamp: UInt64(Date().timeIntervalSince1970),
+    buildTime: UInt64(Date().timeIntervalSince1970),
+    pageClassName: "BHProfileViewController", app: 42, note: "hotfix"
+)!
+Watermark.installV52(payload: payload, delta: 8, plane: .chroma)
+// On navigation: Watermark.updateV52(payload: nextPayload)
+```
+
+The first v5.2 CLI line reports `protocol`, `correctedBits`, `softRecovery`, `scale`, `phase`,
+`pilotScore`, and `candidateCount`; with `--layout`, the second line adds compact fields and
+`crcStatus=OK`. The historical bare `--auto` keeps its v4 phase/plane search. For migration, opt in to
+mixed detection with `--protocol auto` (v5.2 first, then v4); use `--protocol v4` to force the historical
+protocol. v5.2 rejects v4 `--bits`, `--key`, `--pages`, and `--dump-codes`: it has no HMAC and its
+eight-character compact page code cannot be looked up by the v4 fifteen-character registry.
+
+`V52SyncMode.pn` and `.separated` are pilot experiment modes; `.none` is the default. They add a small
+left/right brightness-direction modulation to a constant-alpha, single-layer tile for correlation
+measurement. The experiment leaves measurable luma residual and has no manual P3/sRGB/OLED visibility
+approval. Chroma data and pilot are generated jointly; delta is a premultiplied-alpha RGBA source-layer
+amplitude, not a simple chroma addition.
+
+The resize path uses fractional rectangle averaging. Automatic search covers a continuous 0.50...1.50
+coarse grid at 0.05 steps, then refines finalists until the step is no larger than
+`0.5 / max(width,height)`, rechecking the local phase. Ratios such as 0.837 and 1.173 are deliberately
+outside the coarse grid and are experimental coverage, not a guarantee for every image or resampler.
+Only uniform scale is covered; rotation, perspective, camera capture, and messenger recompression remain
+out of scope.
+
+Reproducible first-pass measurements (Swift 6.3.3, macOS Command Line Tools, 640×900 synthetic grey
+background, chroma, alpha=8, tiled PNG; timing includes the stated search):
+
+| Path | Condition | Result |
+| --- | --- | --- |
+| baseline | phase=(3,5), `sync=none`, tile-shift search | payload equal, `correctedBits=0`, one candidate |
+| pilot | `.pn` / `.separated` under the same conditions | payload equal; both pilot scores about 0.995 (diagnostic only) |
+| resize | nearest-generated 0.50 / 0.837 / 1.173 / 1.50 images with scale supplied | 4/4 payloads equal |
+| unlisted-scale search | 0.837, `--protocol v5.2 --auto` coarse grid plus local refinement | about 0.66 s, estimated scale 0.8358, payload equal |
+| crop | 9 px left and 13 px top, unknown phase/tile shift | payload equal, one candidate |
+| negative | 640×900 plain image | no CRC-valid candidate |
+
+These are synthetic PNG protocol/geometry measurements. They do not establish device, JPEG, P3/sRGB,
+OLED-visibility, or messenger acceptance; the Demo and manual visibility pass still require Xcode and a
+device.
+
 ## Measured results and limits
 
 ### Unit tests
 
-`swift test` covers 48 cases (runs on macOS, no simulator needed): pure white / pure black / mid
+`swift test` covers 55 cases (runs on macOS, no simulator needed): pure white / pure black / mid
 grey backgrounds, gradients plus photo-level detail, JPEG q=0.8 and q=0.6, partial cropping
 (vertical, horizontal, odd-block offsets), the `delta = 2` floor, no false positives on
 watermark-free images, tile geometry contracts, decodability of both chroma and luma, adversarial
@@ -353,7 +438,7 @@ near-copy aliases being rejected by the self-check but not by the structural che
 restoring `|z|` for odd-block crops, `findBestOffset` (arbiter-driven) and
 PageRegistry / PageNameCodec.
 
-`python3 tools/test_bwdecode.py` adds 74 checks and cross-checks against the Swift binary on the
+`python3 tools/test_bwdecode.py` adds 102 checks and cross-checks against the Swift binary on the
 same PNG.
 
 ### Per-page simulator measurements
@@ -430,9 +515,9 @@ cd Demo && ./sweep.sh "<UDID>" 4 luma          # switch plane / find the margin 
 - **Chroma adversarial samples**: a scene whose chroma structure happens to sit at the 8 px scale
   degrades. `testChromaNeverSilentlyWrongOnAdversarialColorTexture` holds the line — such cases
   must fail to decode or report low confidence; silently returning a wrong payload is not allowed.
-- **Resizing breaks it**: a resized screenshot (chat app forwarding, any resize) changes both the
-  block size and the tiling period, so nothing decodes. Only native device-pixel resolution works;
-  ask the user for the **original** image.
+- **Resizing breaks v4**: a resized v4 screenshot (chat app forwarding, any resize) changes both the
+  block size and the tiling period, so nothing decodes. For a uniform resize, try v5.2 with `--scale`
+  or `--protocol v5.2 --auto`; that path does not cover unknown messenger recompression.
 - **Photographing the screen does not work**: moiré and geometric distortion wreck the block grid;
   that path needs a sync template plus deep learning and is out of scope here.
 - **Cropping does work**: `--auto` covers vertical and horizontal crops (including half-pair and
@@ -461,12 +546,13 @@ Tuning knobs via environment variables (prefix with `SIMCTL_CHILD_` for `xcrun s
 `.github/workflows/ci.yml` runs four things on every PR:
 
 1. `swift build` (all targets compile)
-2. `swift test` (48 core test cases)
+2. `swift test` (55 core test cases)
 3. `xcodegen generate` + `xcodebuild -destination 'generic/platform=iOS Simulator'` building
    `Demo/`, which covers iOS-side compilation (the UIKit window layer, the ObjC `+load`) that
    `swift test` cannot reach on macOS.
-4. `python3 tools/test_bwdecode.py`: Python decoder self-check (synthetic round trip, cropping,
-   tamper detection, page codes) cross-checked against the Swift `bwdecode` on the same PNG.
+4. `python3 tools/test_bwdecode.py`: Python decoder self-check (v4/v5.2 synthetic round trip,
+   cropping, resizing, tamper detection, page codes; 102 checks) cross-checked against the Swift
+   `bwdecode` on the same PNG.
 
 Reproduce locally:
 

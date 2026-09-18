@@ -28,6 +28,9 @@ tools/bwdecode.py             Python 版解码器（镜像实现），tools/test
 swift build                          # 编译全部 target
 swift test                           # 跑核心测试，macOS 本机即可，不需要模拟器
 swift run bwdecode shot.png --layout --key <hex> --pages Demo/pages.json
+swift run bwdecode shot.png --protocol v5.2 --layout --scale 0.837
+swift run bwdecode shot.png --auto --layout       # 历史 v4 相位/平面搜索
+swift run bwdecode shot.png --protocol auto --layout  # 显式混合探测：先 v5.2，再回退 v4
 Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比，需 xcodegen + 已启动模拟器
 ```
 
@@ -36,7 +39,7 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - **不新增第三方依赖。** 只用系统框架：Accelerate、CryptoKit、CoreGraphics、UIKit。
 - **平台下限 iOS 13 / macOS 11**（Demo 是 iOS 15）。用到的新 API 必须满足可用性，必要时 `@available` 兜底。
 - **编解码参数必须两端一致**：`payloadBits` / `plane` / `offset` / 载荷布局。任何一项不一致都会解出自洽但错误的结果。
-- **载荷布局 v4（512 bit / 64 字节）是当前唯一布局**：uid + Unix 秒 + build(12 位十进制) +
+- **v4（512 bit / 64 字节）仍是默认布局并必须保留**：uid + Unix 秒 + build(12 位十进制) +
   15 字符页面短码（96 bit 字段，90 bit 有效，低 6 位必须为 0）+ tag + 22 字节 note + 96 bit 校验值。
   改字段边界 = 换协议、历史截图失效，必须显式说明影响面并同步 README / SKILL。
 - **`校验值` 字段是「校验值」，有三种语义**：HMAC-SHA256 截断（有服务端密钥）、SHA-256 截断（无密钥部署的公开自检值，
@@ -47,10 +50,17 @@ Demo/sweep.sh [模拟器UDID] [delta] [luma|chroma]   # 逐页截图解码对比
 - **裁剪自愈靠校验值裁决**：CLI 的阶梯是「严格校验器（HMAC 或自检值）→ 加 block 奇偶档 → 结构自检兜底」。
   结构自检是兵底（实测全搜索空间里放过 4~17 个近似解），用到它必须打警告并如实报 `mac=未签名`。
 - **改载荷布局 = 破坏历史截图兼容。** 必须显式说明影响面，并同步 `README.md` 与 `skills/blind-watermark/SKILL.md`。
+- **v5.2 是显式 opt-in 的另一协议**：207 bit 信息字段（profile4 + uid32 + timestamp31 + buildTime24 +
+  page8/base37 42 + app14 + note6/base37 32 + CRC24 + reserved4），用 BCH(255,207,t6) 编码并追加一位整体偶校验形成 256 bit 码字；
+  `Watermark.installV52` / `--protocol v5.2` 才启用，默认渲染与历史解码仍走 v4。
+- v5.2 的时间字段是 UTC 2026-01-01 起的秒/分钟偏移；base37 字母表为 `a-z0-9_`，首字符为高位 radix digit，固定宽度右侧 `_` 补齐且解码去掉尾部补位；非法 radix 值、profile、reserved 或 CRC 必须拒绝。
+- v5.2 的 256 bit 码字在每个 256 px tile 中重复两次且业务极性相反；`V52Codec` 的有限 Chase 只在低可靠位上尝试最多 12 位、2 次翻转，并收集全部 CRC-valid 候选后去重，不能遇到首个 CRC 通过就返回。CRC 仅是完整性检查，不是验签。
+- v5.2 的 `V52SyncMode.pn/separated` 是 pilot 实验档，默认 `.none`；实验档的公共亮度调制会记录亮度残差，不得宣称不可见或已通过人工验收。缩放搜索为 0.50...1.50 连续粗网格加图像跨度相关的局部精搜，0.837/1.173 等比例必须作为未列入粗网格的测试。
+- chroma delta 必须按预乘 alpha 的整层 RGBA 合成验证，不能把 `delta` 当作简单的 chroma 加法；pilot 与 data 联合生成时 alpha 保持恒定。
 - **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
-- **改解码逻辑要同步两处**：`Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
+- **改解码逻辑要同步两处**：v4 的 `Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
   是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码、校验阶梯）。
-  改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。
+  v5.2 的 `V52Codec.swift` 与其 Python 镜像也必须同步；改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。
 - **非平凡逻辑留一个可运行校验**（单元测试或 assert 自检），不靠"我推理过"。
 - **性能结论要实测。** 不接受"预期 4–8x"这类没测过的数字；写实测值并注明测量条件（设备/模拟器、模式、样本）。
 - **不要静默降级**：解码置信度不足时按 `弱 bit` 规则如实报 `WEAK` / `NO`，不硬凑一个结果。
