@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermarkCore'
-  s.version          = '2.0.0'
+  s.version          = '2.1.0'
   s.summary          = '盲水印编解码核心（跨平台，无 UI 依赖）'
   s.description      = <<-DESC
     覆盖 App 全部界面的低幅度色度扰动层，肉眼不可见，截图必然被带上。
