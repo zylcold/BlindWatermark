@@ -624,6 +624,30 @@ Observation counts are geometry, not amplitude (all six pages report `minObs=76`
 depends on the page content and the payload pattern of that run, so the photo page landed anywhere
 between 14 and 42 across four runs — treat the column as a margin indicator, not a monotone curve.
 
+The same text-free 240×120 patch of the flat gradient page, magnified 3× (nearest) at delta = 2 / 4 / 8:
+
+![delta 2/4/8 comparison](docs/images/visibility-delta.png)
+
+![delta=4 at 1:1](docs/images/visibility-delta4-1x.png)
+
+- The comparison above is **magnified** so the blocks can be counted; the real impression is the
+  [1:1 crop](docs/images/visibility-delta4-1x.png) — on a simulator it reads as very faint colour noise
+  and the 8 px block pairs are hard to make out without zooming.
+- At 3× you can count the 8 px blocks, the 16 px pair period, and the polarity flip at each 256 px tile
+  boundary.
+- The chroma axis swings by `delta` (the ΔB column); the luma axis is matched to ≤0.8/255 — **"invisible"
+  refers to the luma axis only**.
+
+This one is delta=4 with chroma **artificially amplified 8×**, purely to expose the geometry —
+do **not** use it to judge visibility:
+
+![delta=4 with chroma amplified](docs/images/visibility-delta4-chroma-x8.png)
+
+All of these are **simulator** screenshots (iPhone 16 / iOS 18.6, `BW_PAGE=plain`, `chroma`,
+`sync=none`). Simulator colour mapping is not a device: the same ΔB=4/255 looks different on P3 / OLED,
+so the visibility decision (delta 4 or 2) still has to come from the real-device + darkest-page pass in
+the integration skill.
+
 v4 for comparison (same page, same delta 8, same palette: ΔB=−8/255): v4 spends twice the observations
 per bit, so its six layouts still report `mac=OK(验签)` at delta=6, while delta=4 pushes the dark/mixed
 pages to 19/512 weak bits. That is why **v5.2 defaults to 4** while **v4 keeps its historical default
