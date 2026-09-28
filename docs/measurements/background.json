@@ -1,0 +1,50 @@
+[
+  {
+    "channel": "original",
+    "success": true,
+    "minObs": 20,
+    "correctedBits": 0
+  },
+  {
+    "channel": "crop",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 9
+  },
+  {
+    "channel": "black",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 9
+  },
+  {
+    "channel": "white",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 13
+  },
+  {
+    "channel": "gray",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 10
+  },
+  {
+    "channel": "frame-first",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 12
+  },
+  {
+    "channel": "down",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 8
+  },
+  {
+    "channel": "up",
+    "success": true,
+    "minObs": 12,
+    "correctedBits": 0
+  }
+]

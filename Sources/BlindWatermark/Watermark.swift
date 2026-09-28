@@ -3,180 +3,54 @@ import UIKit
 import BlindWatermarkCore
 import BlindWatermarkAutoLoad
 
-/// SPM 下 `BlindWatermarkCore` 是另一个模块，接入方只 `import BlindWatermark` 时也得能拿到这个枚举。
+public typealias WatermarkPayload = BlindWatermarkCore.WatermarkPayload
 public typealias WatermarkPlane = BlindWatermarkCore.WatermarkPlane
-/// v5.2 的公开类型同样从 UI 门面导出，接入方无需额外 import Core 模块。
-public typealias WatermarkPayloadV52 = BlindWatermarkCore.WatermarkPayloadV52
-public typealias V52SyncMode = BlindWatermarkCore.V52SyncMode
 
-/// 屏上盲水印入口。
-///
-/// 常驻覆盖 App 全部界面，截图必然带水印，事后用 `bwdecode` 从截图还原 payload 溯源。
+/// 所有入口仅渲染 v6；完整字段由类型校验，不能传任意 bit 布局。
 public enum Watermark {
-
-    /// 手动接入：立刻设置 payload，并挂载到当前所有 scene（后续新 scene 自动挂载）。
-    ///
-    ///     Watermark.install(payload: serverIssued16Bytes)
-    public static func install(
-        payload: [UInt8],
-        payloadBits: Int? = nil,
-        delta: UInt8 = 8,
-        plane: WatermarkPlane = .chroma,
-        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
-    ) {
-        WatermarkState.shared.configure(
-            payload: payload,
-            payloadBits: payloadBits ?? payload.count * 8,
-            delta: delta,
-            plane: plane,
-            windowLevel: windowLevel
-        )
-        WatermarkState.shared.start()
-    }
-
-    /// 默认盖在系统弹窗之上（`.alert + 1`）：截图要能溯源到弹窗场景。
-    /// 水印层不参与交互（`isUserInteractionEnabled = false` + `hitTest` 返回 nil），
-    /// 亮度残差 0.07/255，盖上去也看不出、点不到。
-    /// 若目标 App 的某些系统 UI 真出了问题，调低它，代价是那些画面截不出水印。
     public static let defaultWindowLevel: UIWindow.Level = .alert + 1
 
-    /// 换页面时重画图案。相位不变，解码端无感；生成一张 tile 是微秒级，导航时随手调。
-    ///
-    ///     Watermark.update(payload: WatermarkPayload(uid: uid, timestamp: ts,
-    ///         pageClassName: type(of: self).description(), key: key).bytes)
-    public static func update(payload: [UInt8], payloadBits: Int? = nil) {
-        WatermarkState.shared.configure(
-            payload: payload,
-            payloadBits: payloadBits ?? payload.count * 8,
-            delta: WatermarkState.shared.effectiveConfig().delta,
-            plane: WatermarkState.shared.effectiveConfig().plane
-        )
-        WatermarkState.shared.refreshPatterns()
-    }
-
-    /// 32 bit 便捷入口
-    public static func install(
-        payload: UInt32,
-        payloadBits: Int = 32,
-        delta: UInt8 = 8,
-        plane: WatermarkPlane = .chroma
-    ) {
-        var bytes = [UInt8](repeating: 0, count: 4)
-        for i in 0..<4 { bytes[i] = UInt8((payload >> (8 * UInt32(i))) & 0xFF) }
-        install(payload: bytes, payloadBits: payloadBits, delta: delta, plane: plane)
-    }
-
-    /// Explicit opt-in v5.2 path. The default `install(payload:)` remains the
-    /// historical v4 renderer so existing integrations keep their protocol.
-    ///
-    /// `delta` 默认 4 而不是 v4 的 8：v5.2 每 bit 有两份反极性副本，观测余量是 v4 的两倍，
-    /// 真机模拟器实测六版式在 delta=4（甚至 2）下 `correctedBits=0`、`candidateCount=1`。
-    /// 可见性是色度轴幅度 = `delta`（亮度轴已被陪色匹配到 ~0.4/255），所以这个默认值直接
-    /// 减半了肉眼能看到的色差。改它之前先按 `skills/blind-watermark-integration` 重跑可见性验收。
-    public static func installV52(
-        payload: WatermarkPayloadV52,
-        delta: UInt8 = 4,
-        plane: WatermarkPlane = .chroma,
-        sync: V52SyncMode = .none,
-        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
-    ) {
-        WatermarkState.shared.configureV52(
-            payload: payload,
-            delta: delta,
-            plane: plane,
-            sync: sync,
-            windowLevel: windowLevel
-        )
+    public static func install(payload: WatermarkPayload, delta: UInt8 = V6Codec.defaultDelta,
+                               plane: WatermarkPlane = .chroma,
+                               windowLevel: UIWindow.Level = defaultWindowLevel) {
+        precondition(Thread.isMainThread, "Watermark UI must be configured on the main thread")
+        precondition(delta >= 2)
+        WatermarkState.shared.config = .init(payload: payload, delta: delta, plane: plane, windowLevel: windowLevel)
         WatermarkState.shared.start()
     }
 
-    /// Update an already mounted v5.2 watermark while preserving its render
-    /// parameters. `sync` can be changed explicitly for pilot experiments.
-    public static func updateV52(
-        payload: WatermarkPayloadV52,
-        sync: V52SyncMode? = nil
-    ) {
-        let config = WatermarkState.shared.effectiveConfig()
-        WatermarkState.shared.configureV52(
-            payload: payload,
-            delta: config.delta,
-            plane: config.plane,
-            sync: sync ?? config.v52Sync,
-            windowLevel: config.windowLevel
-        )
+    public static func update(payload: WatermarkPayload) {
+        precondition(Thread.isMainThread, "Watermark UI must be configured on the main thread")
+        var config = WatermarkState.shared.effectiveConfig()
+        config.payload = payload
+        WatermarkState.shared.config = config
         WatermarkState.shared.refreshPatterns()
     }
 
-    /// 零接入模式下的 payload 来源。默认用 `identifierForVendor` 哈希 + Unix 秒
-    /// 拼一个 layout v4（512 bit）载荷（`WatermarkDefaultPayload.currentBytes()`）。
-    ///
-    /// 生产环境应当换掉：payload 需要服务端下发并签名，客户端不要持有明文映射表。
-    public static var payloadProvider: (() -> [UInt8])? {
+    /// 无显式 install 时，每次回前台与换页刷新从这个类型化入口取载荷。
+    public static var payloadProvider: (() -> WatermarkPayload)? {
         get { WatermarkState.shared.payloadProvider }
-        set { WatermarkState.shared.payloadProvider = newValue }
+        set {
+            precondition(Thread.isMainThread)
+            WatermarkState.shared.payloadProvider = newValue
+        }
     }
 }
 
-/// 内部状态，全局只有一份。
 final class WatermarkState {
     static let shared = WatermarkState()
-
     struct Config {
-        var payload: [UInt8]
-        var payloadBits: Int
-        var delta: UInt8
-        var plane: WatermarkPlane
-        var v52Payload: WatermarkPayloadV52?
-        var v52Sync: V52SyncMode
+        var payload: WatermarkPayload
+        var delta: UInt8 = V6Codec.defaultDelta
+        var plane: WatermarkPlane = .chroma
         var windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
     }
-
-    var payloadProvider: (() -> [UInt8])?
-
-    private var config: Config?
+    var config: Config?
+    var payloadProvider: (() -> WatermarkPayload)?
     private var windows: [ObjectIdentifier: WatermarkWindow] = [:]
     private var observerTokens: [NSObjectProtocol] = []
     private var started = false
-
     private init() {}
-
-    func configure(
-        payload: [UInt8],
-        payloadBits: Int,
-        delta: UInt8,
-        plane: WatermarkPlane,
-        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
-    ) {
-        config = Config(
-            payload: payload,
-            payloadBits: payloadBits,
-            delta: delta,
-            plane: plane,
-            v52Payload: nil,
-            v52Sync: .none,
-            windowLevel: windowLevel
-        )
-    }
-
-    func configureV52(
-        payload: WatermarkPayloadV52,
-        delta: UInt8,
-        plane: WatermarkPlane,
-        sync: V52SyncMode,
-        windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
-    ) {
-        config = Config(
-            payload: payload.bytes,
-            // v5.2 分支不读 payloadBits（走 v52Payload 生成 tile），这里存消息位数而不是物理码字长度，
-            // 免得后来者把一个 26 字节的 payload 当成 32 字节码字。
-            payloadBits: payload.bytes.count * 8,
-            delta: delta,
-            plane: plane,
-            v52Payload: payload,
-            v52Sync: sync,
-            windowLevel: windowLevel
-        )
-    }
 
     /// 幂等。首次调用注册通知，之后只刷新图案。
     func start() {
@@ -235,8 +109,7 @@ final class WatermarkState {
     func refreshPatterns() {
         for window in windows.values {
             guard let scene = window.windowScene else { continue }
-            // ponytail: 仅在 App 激活时重画，displayScale 中途变化（外接屏）不处理；
-            // 真接了 iPad 外接屏再监听 traitCollectionDidChange。
+            window.windowLevel = effectiveConfig().windowLevel
             if let pattern = makePattern(scale: scene.traitCollection.displayScale) {
                 window.update(pattern: pattern)
             }
@@ -244,69 +117,26 @@ final class WatermarkState {
     }
 
     func effectiveConfig() -> Config {
-        if let config { return config }
-        let payload = payloadProvider?() ?? WatermarkDefaultPayload.currentBytes()
-        return Config(
-            payload: payload,
-            payloadBits: min(BlockCodec.maxPayloadBits, payload.count * 8),
-            delta: 8,
-            plane: .chroma,
-            v52Payload: nil,
-            v52Sync: .none
-        )
+        config ?? Config(payload: payloadProvider?() ?? WatermarkDefaultPayload.current())
     }
 
     private func makePattern(scale: CGFloat) -> UIImage? {
         let config = effectiveConfig()
-        let tile: RGBAImage
-        if let compact = config.v52Payload {
-            tile = V52Codec.makeTile(
-                payload: compact,
-                alpha: config.delta,
-                plane: config.plane,
-                sync: config.v52Sync
-            )
-        } else {
-            tile = BlockCodec.makeTile(
-                payload: config.payload,
-                payloadBits: config.payloadBits,
-                alpha: config.delta,
-                plane: config.plane
-            )
-        }
-        guard let cgImage = tile.makeCGImage() else { return nil }
-        // scale 与屏幕一致，tile 才是 256 **设备像素**，块大小恒定 16 设备像素
-        return UIImage(cgImage: cgImage, scale: max(1, scale), orientation: .up)
+        let tile = V6Codec.makeTile(payload: config.payload, delta: config.delta, plane: config.plane)
+        guard let image = tile.makeCGImage() else { return nil }
+        return UIImage(cgImage: image, scale: max(1, scale), orientation: .up)
     }
 }
 
-/// 默认 payload（layout v4, 512 bit）：uid 位填设备哈希，时间戳填当前 Unix 秒，
-/// build / 页面短码 / note 留空，校验值填**公开自检值**。
-///
-/// ponytail: 自检值能拦"解错了"，但拦不住伪造（谁都能算）—— 上生产换成服务端下发并验签的 payload。
+/// 零接入用 IDFV 哈希跑通链路；该 uid 不可逆，也不是身份凭据。
 enum WatermarkDefaultPayload {
-    static func currentBytes() -> [UInt8] {
-        WatermarkPayload.selfChecked(
-            uid: deviceHash(),
-            timestamp: UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max)))),
-            build: 0,
-            pageClassName: ""
-        ).bytes
-    }
-
-    static func deviceHash() -> UInt32 {
+    static func current() -> WatermarkPayload {
         let seed = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-vendor"
-        return fnv1a(seed)
-    }
-
-    static func fnv1a(_ string: String) -> UInt32 {
         var hash: UInt32 = 0x811C_9DC5
-        for byte in string.utf8 {
-            hash ^= UInt32(byte)
-            hash = hash &* 0x0100_0193
-        }
-        return hash
+        for byte in seed.utf8 { hash = (hash ^ UInt32(byte)) &* 0x0100_0193 }
+        let now = UInt64(max(Double(WatermarkPayload.timestampEpoch), Date().timeIntervalSince1970))
+        return WatermarkPayload(uid: hash, timestamp: now, buildTime: WatermarkPayload.timestampEpoch,
+                                pageClassName: "")!
     }
 }
-
 #endif

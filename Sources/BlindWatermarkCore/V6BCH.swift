@@ -1,21 +1,16 @@
 import Foundation
 
-/// Binary narrow-sense BCH(255,207), t=6.
-///
-/// The 255-bit codeword uses the conventional little-endian polynomial form:
-/// the 48 parity bits occupy degrees 0...47 and the 207 information bits occupy
-/// degrees 48...254. The 256th bit is an even parity extension. The generator
-/// polynomial is the product of the binary minimal polynomials for roots
-/// alpha^1...alpha^12 over GF(2^8), primitive polynomial 0x11d:
-/// `0x1c7eb85df3c97` (degree 48).
-public enum V52BCH {
-    public static let codewordBits = 256
-    public static let bchBits = 255
-    public static let messageBits = 207
-    public static let parityBits = 48
-    public static let correctionLimit = 6
-    public static let messageByteCount = 26
-    public static let codewordByteCount = 32
+/// BCH(511,211,t=40) over GF(512), primitive polynomial x^9+x^4+1.
+/// 300 parity bits precede 211 information bits; bit 511 is overall even parity.
+/// Roots alpha^1...alpha^80 fix the generator; tests pin its golden codeword.
+public enum V6BCH {
+    public static let codewordBits = 512
+    public static let bchBits = 511
+    public static let messageBits = 211
+    public static let parityBits = 300
+    public static let correctionLimit = 40
+    public static let messageByteCount = 27
+    public static let codewordByteCount = 64
 
     /// Decode diagnostics. A nil result means the BCH check could not produce a
     /// codeword whose systematic re-encoding matches the corrected bits.
@@ -25,24 +20,44 @@ public enum V52BCH {
         public let correctedBits: Int
     }
 
-    private static let generator: UInt64 = 0x1C7E_B85D_F3C9_7
+    private static let generator: [Bool] = {
+        var roots = Set<Int>()
+        for root in 1...(2 * correctionLimit) {
+            var value = root
+            repeat {
+                roots.insert(value)
+                value = value * 2 % bchBits
+            } while value != root
+        }
+        var polynomial = [1]
+        for root in roots.sorted() {
+            var next = [Int](repeating: 0, count: polynomial.count + 1)
+            for index in polynomial.indices {
+                next[index] ^= gfMultiply(polynomial[index], gfExp(root))
+                next[index + 1] ^= polynomial[index]
+            }
+            polynomial = next
+        }
+        precondition(polynomial.count == parityBits + 1 && polynomial.allSatisfy { $0 == 0 || $0 == 1 })
+        return polynomial.map { $0 != 0 }
+    }()
     private static let gfTables: (exp: [Int], log: [Int]) = {
-        var exp = [Int](repeating: 0, count: 510)
-        var log = [Int](repeating: -1, count: 256)
+        var exp = [Int](repeating: 0, count: 1022)
+        var log = [Int](repeating: -1, count: 512)
         var value = 1
-        for index in 0..<255 {
+        for index in 0..<511 {
             exp[index] = value
             log[value] = index
             value <<= 1
-            if (value & 0x100) != 0 { value ^= 0x11D }
+            if (value & 0x200) != 0 { value ^= 0x211 }
         }
-        for index in 255..<510 { exp[index] = exp[index - 255] }
+        for index in 511..<1022 { exp[index] = exp[index - 511] }
         return (exp, log)
     }()
 
     public static func encode(messageBytes: [UInt8]) -> [UInt8] {
-        precondition(messageBytes.count == messageByteCount, "v5.2 BCH message must be 26 bytes")
-        precondition(messageBytes[messageByteCount - 1] & 0x80 == 0, "v5.2 message bit 207 must be zero padding")
+        precondition(messageBytes.count == messageByteCount, "v6 BCH message must be 27 bytes")
+        precondition(messageBytes[messageByteCount - 1] & 0xF8 == 0, "v6 message bits 211...215 must be zero padding")
         var work = [Bool](repeating: false, count: bchBits)
         for index in 0..<messageBits {
             work[parityBits + index] = bit(messageBytes, at: index)
@@ -52,7 +67,7 @@ public enum V52BCH {
         if bchBits > parityBits {
             for pivot in stride(from: bchBits - 1, through: parityBits, by: -1) where work[pivot] {
                 let shift = pivot - parityBits
-                for offset in 0...parityBits where ((generator >> UInt64(offset)) & 1) != 0 {
+                for offset in 0...parityBits where generator[offset] {
                     work[shift + offset].toggle()
                 }
             }
@@ -61,11 +76,11 @@ public enum V52BCH {
         var codeword = [Bool](repeating: false, count: codewordBits)
         for index in 0..<parityBits { codeword[index] = work[index] }
         for index in 0..<messageBits { codeword[parityBits + index] = bit(messageBytes, at: index) }
-        codeword[255] = codeword[0..<255].reduce(false) { $0 != $1 }
+        codeword[511] = codeword[0..<511].reduce(false) { $0 != $1 }
         return pack(codeword)
     }
 
-    /// Correct up to six errors in the BCH portion. The extension parity bit is
+    /// Correct up to forty errors in the BCH portion. The extension parity bit is
     /// corrected separately after BCH recovery, so a single flipped extension bit
     /// remains recoverable without spending a BCH error budget.
     public static func decode(codewordBytes: [UInt8]) -> Decoded? {
@@ -76,14 +91,15 @@ public enum V52BCH {
         let corrected = bch.bits
         let expectedParity = corrected.reduce(false) { $0 != $1 }
         var correctedBits = bch.correctedBits
-        if received[255] != expectedParity { correctedBits += 1 }
+        if received[511] != expectedParity { correctedBits += 1 }
 
         var full = corrected
         full.append(expectedParity)
         let message = pack(Array(corrected[parityBits..<bchBits]))
         // Re-encoding is a cheap, unambiguous guard against a false locator.
-        guard encode(messageBytes: message).prefix(32) == pack(full).prefix(32) else { return nil }
-        return Decoded(messageBytes: message, codewordBytes: pack(full), correctedBits: correctedBits)
+        let codeword = pack(full)
+        guard encode(messageBytes: message) == codeword else { return nil }
+        return Decoded(messageBytes: message, codewordBytes: codeword, correctedBits: correctedBits)
     }
 
     // MARK: - Binary BCH decoder
@@ -108,7 +124,7 @@ public enum V52BCH {
         for errorDegree in 0..<bchBits {
             // A coefficient at x^errorDegree contributes alpha^(j*errorDegree)
             // to syndrome j; its locator root is alpha^(-errorDegree).
-            let x = errorDegree == 0 ? 1 : gfExp((255 - errorDegree) % 255)
+            let x = errorDegree == 0 ? 1 : gfExp((511 - errorDegree) % 511)
             var value = 0
             var power = 1
             for coefficient in locator {
@@ -125,18 +141,18 @@ public enum V52BCH {
         return BCHDecoded(bits: corrected, correctedBits: positions.count)
     }
 
-    /// Syndromes S_1...S_12. The bit array is in polynomial degree order.
+    /// Syndromes S_1...S_80. The bit array is in polynomial degree order.
     private static func syndromes(for bits: [Bool]) -> [Int] {
         (1...(2 * correctionLimit)).map { order in
             var value = 0
             for degree in 0..<bits.count where bits[degree] {
-                value ^= gfExp((order * degree) % 255)
+                value ^= gfExp((order * degree) % 511)
             }
             return value
         }
     }
 
-    /// Berlekamp-Massey over GF(256), returning coefficients in ascending powers
+    /// Berlekamp-Massey over GF(512), returning coefficients in ascending powers
     /// of x (`[1, lambda1, ...]`).
     private static func berlekampMassey(_ syndromes: [Int]) -> [Int]? {
         var connection = [Int](repeating: 0, count: 2 * correctionLimit + 1)
@@ -179,7 +195,7 @@ public enum V52BCH {
     }
 
     private static func gfExp(_ exponent: Int) -> Int {
-        gfTables.exp[(exponent % 255 + 255) % 255]
+        gfTables.exp[(exponent % 511 + 511) % 511]
     }
 
     private static func gfMultiply(_ lhs: Int, _ rhs: Int) -> Int {
@@ -189,7 +205,7 @@ public enum V52BCH {
 
     private static func gfInverse(_ value: Int) -> Int {
         precondition(value != 0)
-        return gfExp(255 - gfTables.log[value])
+        return gfExp(511 - gfTables.log[value])
     }
 
     private static func bit(_ bytes: [UInt8], at index: Int) -> Bool {

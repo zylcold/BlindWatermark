@@ -3,8 +3,8 @@ import UIKit
 
 /// 每个 scene 一个覆盖全屏的水印窗口。
 ///
-/// 不参与交互、不成为 key window，只贡献一层几乎不可见的亮度扰动。
-/// 截图/录屏走 render server 合成，本窗口的像素必然被带进产物里 —— 不需要 hook 截屏 API。
+/// 不参与交互、不成为 key window，叠加一层低幅度色度载波；可见性需要在目标设备验收。
+/// 截图/录屏走 render server 合成，可见窗口的像素随正常系统截图进入产物 —— 不需要 hook 截屏 API。
 final class WatermarkWindow: UIWindow {
     private let host = UIViewController()
 

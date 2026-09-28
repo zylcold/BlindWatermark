@@ -1,0 +1,1074 @@
+[
+  {
+    "page": "plain",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 8,
+    "pythonSeconds": 0.281,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 8,
+    "pythonSeconds": 0.331,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 7,
+    "pythonSeconds": 0.256,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 1.038,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 19,
+    "pythonSeconds": 0.745,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 4,
+    "pythonSeconds": 0.354,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 0,
+    "pythonSeconds": 0.351,
+    "swiftExit": 0
+  },
+  {
+    "page": "plain",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 0,
+    "correctedBits": 17,
+    "pythonSeconds": 0.338,
+    "swiftExit": 1
+  },
+  {
+    "page": "white",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.392,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.374,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 7,
+    "pythonSeconds": 0.265,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 7,
+    "pythonSeconds": 0.235,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 19,
+    "pythonSeconds": 0.376,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 4,
+    "pythonSeconds": 0.28,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 0,
+    "pythonSeconds": 0.293,
+    "swiftExit": 0
+  },
+  {
+    "page": "white",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 0,
+    "correctedBits": 11,
+    "pythonSeconds": 0.249,
+    "swiftExit": 1
+  },
+  {
+    "page": "text",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.309,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.314,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 5,
+    "pythonSeconds": 0.173,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.168,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 12,
+    "pythonSeconds": 0.301,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 2,
+    "pythonSeconds": 0.305,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 0,
+    "pythonSeconds": 0.29,
+    "swiftExit": 0
+  },
+  {
+    "page": "text",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 0,
+    "correctedBits": 21,
+    "pythonSeconds": 0.247,
+    "swiftExit": 1
+  },
+  {
+    "page": "photo",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 30,
+    "pythonSeconds": 0.312,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      0,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 30,
+    "pythonSeconds": 0.307,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 34,
+    "pythonSeconds": 0.277,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 35,
+    "pythonSeconds": 0.282,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      0,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 26,
+    "pythonSeconds": 0.311,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      17,
+      0,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 31,
+    "pythonSeconds": 0.213,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      17,
+      0,
+      19,
+      23
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 11,
+    "pythonSeconds": 0.35,
+    "swiftExit": 0
+  },
+  {
+    "page": "photo",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": false,
+    "passed": true,
+    "minObs": null,
+    "correctedBits": null,
+    "pythonSeconds": 0.575,
+    "swiftExit": 1
+  },
+  {
+    "page": "dark",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 7,
+    "pythonSeconds": 0.286,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 5,
+    "pythonSeconds": 0.172,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 5,
+    "pythonSeconds": 0.164,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.169,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 13,
+    "pythonSeconds": 0.221,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 4,
+    "pythonSeconds": 0.209,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 0,
+    "pythonSeconds": 0.297,
+    "swiftExit": 0
+  },
+  {
+    "page": "dark",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 0,
+    "correctedBits": 10,
+    "pythonSeconds": 0.234,
+    "swiftExit": 1
+  },
+  {
+    "page": "mixed",
+    "channel": "crop",
+    "scale": 1.0,
+    "size": [
+      1206,
+      1542
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      7
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 10,
+    "correctedBits": 4,
+    "pythonSeconds": 0.307,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "black",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      30
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 10,
+    "correctedBits": 4,
+    "pythonSeconds": 0.31,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "white",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.386,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "gray",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 12,
+    "correctedBits": 6,
+    "pythonSeconds": 0.389,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "frame-first",
+    "scale": 1.0,
+    "size": [
+      1242,
+      1596
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      30
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 10,
+    "correctedBits": 8,
+    "pythonSeconds": 0.475,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "down",
+    "scale": 0.837,
+    "size": [
+      1045,
+      1345
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      28
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 10,
+    "correctedBits": 5,
+    "pythonSeconds": 0.273,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "up",
+    "scale": 1.173,
+    "size": [
+      1451,
+      1863
+    ],
+    "trim": [
+      17,
+      31,
+      19,
+      31
+    ],
+    "accepted": true,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 10,
+    "correctedBits": 0,
+    "pythonSeconds": 0.305,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "small",
+    "scale": 1.0,
+    "size": [
+      544,
+      512
+    ],
+    "trim": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "accepted": false,
+    "fieldsEqual": true,
+    "passed": true,
+    "minObs": 0,
+    "correctedBits": 10,
+    "pythonSeconds": 0.199,
+    "swiftExit": 1
+  },
+  {
+    "page": "mixed",
+    "channel": "auto-down",
+    "passed": true,
+    "estimatedScale": 0.837885,
+    "pythonSeconds": 13.185,
+    "swiftExit": 0
+  },
+  {
+    "page": "mixed",
+    "channel": "auto-up",
+    "passed": true,
+    "estimatedScale": 1.172776,
+    "pythonSeconds": 30.236,
+    "swiftExit": 0
+  }
+]

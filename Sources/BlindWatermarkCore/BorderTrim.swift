@@ -18,7 +18,7 @@ public struct UniformBorderTrim: Equatable {
 
     public var isEmpty: Bool { left == 0 && top == 0 && right == 0 && bottom == 0 }
 
-    /// `trim=(左,上,右,下)`，写进 CLI 输出；没裁时返回 nil，保持旧输出格式不变。
+    /// `trim=(左,上,右,下)`，写进 CLI 输出；没裁时返回 nil。
     public var outputField: String? {
         isEmpty ? nil : "trim=(\(left),\(top),\(right),\(bottom))"
     }
@@ -45,9 +45,8 @@ extension RGBAImage {
 
     /// 裁掉四边的纯黑边框（IM 转发、图片查看器给截图套的黑底）。
     ///
-    /// 为什么需要：黑边本身不产生观测，但**黑边与内容交界的那几列 pair** 会拿到量级很大、方向固定的
-    /// 假差分，并按 tile 周期性反复砸在同样的 bit 上 —— 折起来就是十几个固定的错 bit，超过 BCH t=6
-    /// 的纠错能力，整张图解不出。实测一张企业微信转发图：不裁失败，裁完 `correctedBits=0`。
+    /// 为什么需要：黑边本身不含水印信号，但**黑边与内容交界的那几列 cell** 会拿到量级很大、方向固定的
+    /// 假差分，并按 tile 周期性反复砸在同样的 bit 上 —— 折起来就是十几个固定的错 bit，消耗纠错预算，整张图解不出。v6 的黑边回归测试验证裁剪后仍能恢复相同字段。
     ///
     /// 保守起见，只在"这条边纯黑 + 紧挨着它就有明显更亮的内容"时才裁：深色 UI 的黑背景、或者跑满
     /// 上限的长条，都当作内容不动。

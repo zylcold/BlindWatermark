@@ -4,7 +4,7 @@ import XCTest
 /// 黑边（IM 转发 / 图片查看器套的纯黑边框）会让交界列的假差分周期性砸在同一批 bit 上，
 /// 把 BCH 的纠错预算用光。这里钉住"能识别"和"不该动的别动"两侧。
 final class BorderTrimTests: XCTestCase {
-    private let payload = WatermarkPayloadV52(
+    private let payload = WatermarkPayload(
         uid: 0x1234_5678, timestampOffset: 1_234_567, buildMinuteOffset: 89_012,
         pageCode: "profile", app: 42, noteCode: "hotfix")!
 
@@ -23,23 +23,22 @@ final class BorderTrimTests: XCTestCase {
     }
 
     func testTrimsBlackBarsAndDecodesAfterwards() throws {
-        var source = RGBAImage(width: 640, height: 900)
+        var source = RGBAImage(width: 1206, height: 1542)
         source.fill((200, 200, 200, 255))
-        source.blendTiled(V52Codec.makeTile(payload: payload, alpha: 4, plane: .chroma), dx: 3, dy: 5)
+        source.blendTiled(V6Codec.makeTile(payload: payload, delta: 4, plane: .chroma), dx: 3, dy: 5)
         let barred = padded(source, left: 9, top: 0, right: 14, bottom: 0)
 
         let (working, trim) = barred.trimmingUniformDarkBorder()
         XCTAssertEqual(trim, UniformBorderTrim(left: 9, top: 0, right: 14, bottom: 0))
-        XCTAssertEqual(working.width, 640)
-        XCTAssertEqual(working.height, 900)
+        XCTAssertEqual(working.width, 1206)
+        XCTAssertEqual(working.height, 1542)
         XCTAssertEqual(trim.outputField, "trim=(9,0,14,0)")
 
-        let decoded = try XCTUnwrap(V52Codec.decodeBest(
-            working, scales: [1.0], planes: [.chroma], syncModes: [.none],
-            searchPhase: true, searchTile: true, maxContexts: 4
+        let decoded = try XCTUnwrap(V6Codec.decodeBest(
+            working, scales: [1.0], plane: .chroma
         ))
         XCTAssertEqual(decoded.payload, payload)
-        XCTAssertEqual(decoded.correctedBits, 0)
+        XCTAssertTrue(decoded.hasSufficientEvidence)
     }
 
     /// 深色页不能整片当成黑边裁掉：黑背景一路顶到裁剪比例上限（25%）时必须整体放弃。

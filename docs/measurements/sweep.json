@@ -1,0 +1,55 @@
+{
+  "device": "4933C6FB-820D-4009-AE21-63F8BD71B720",
+  "delta": "4",
+  "plane": "chroma",
+  "reports": [
+    {
+      "page": "plain",
+      "file": "plain.png",
+      "exit": 0,
+      "seconds": 0.162,
+      "stdout": "protocol=v6 payload=0xf6eedbea9daa4616b0852f18b0f4f6902a0040066fc7942b410400 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.999 minObs=22 avgObs=27.3 |z|中位=35.4 OK\nuid=3735928559 time=2026-09-28 08:22:01 UTC page=plain buildTime=2026-09-28 08:22:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    },
+    {
+      "page": "white",
+      "file": "white.png",
+      "exit": 0,
+      "seconds": 0.117,
+      "stdout": "protocol=v6 payload=0xf6eedbeaadab4616b0852f88c2a9b0542f0040066fc784a2c00100 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.999 minObs=22 avgObs=27.3 |z|中位=35.2 OK\nuid=3735928559 time=2026-09-28 08:22:18 UTC page=whitecha buildTime=2026-09-28 08:22:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    },
+    {
+      "page": "text",
+      "file": "text.png",
+      "exit": 0,
+      "seconds": 0.158,
+      "stdout": "protocol=v6 payload=0xf6eedbea8dac4616b0852fa8e061d1352d0040066fc7f41aaa0700 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.999 minObs=22 avgObs=27.3 |z|中位=35.2 OK\nuid=3735928559 time=2026-09-28 08:22:32 UTC page=textlist buildTime=2026-09-28 08:22:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    },
+    {
+      "page": "photo",
+      "file": "photo.png",
+      "exit": 0,
+      "seconds": 0.377,
+      "stdout": "protocol=v6 payload=0xf6eedbeaadad4616b0852fa0fbf9b17f2a0040066fc75428010700 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.980 minObs=22 avgObs=27.3 |z|中位=4.1 OK\nuid=3735928559 time=2026-09-28 08:22:50 UTC page=photogri buildTime=2026-09-28 08:22:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    },
+    {
+      "page": "dark",
+      "file": "dark.png",
+      "exit": 0,
+      "seconds": 0.151,
+      "stdout": "protocol=v6 payload=0xf6eedbeaadae4616b8852f18537eb414220040066fc744fd850700 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.997 minObs=22 avgObs=27.3 |z|中位=35.2 OK\nuid=3735928559 time=2026-09-28 08:23:06 UTC page=darkmode buildTime=2026-09-28 08:23:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    },
+    {
+      "page": "mixed",
+      "file": "mixed.png",
+      "exit": 0,
+      "seconds": 0.163,
+      "stdout": "protocol=v6 payload=0xf6eedbea9daf4616b8852fb8e5301c73280040066fc72c77da0400 plane=chroma phase=(0.00,0.00) tileShift=(0,0) scale=1.000000 correctedBits=0 softRecovery=false pilotScore=0.997 minObs=22 avgObs=27.3 |z|中位=25.4 OK\nuid=3735928559 time=2026-09-28 08:23:21 UTC page=mixedfee buildTime=2026-09-28 08:23:00 UTC app=1 note=（空） crcStatus=OK(完整性自检,未验签)\n",
+      "stderr": ""
+    }
+  ]
+}

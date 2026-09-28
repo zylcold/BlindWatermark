@@ -6,7 +6,7 @@ import UIKit
 // Demo 是 SwiftUI 写的、没有这些 VC，为了让「短码 → grep → 类名」这条链路
 // 在这里也能端到端跑通，显式声明出同名类。
 //
-// 接入端只要把真正想监控的类名登记进 PageRegistry，接法与此无关。
+// 接入端只要把真正想监控的类名作为 pageClassName 传给 WatermarkPayload，接法与此无关。
 
 final class BHPlainViewController: UIViewController {}
 final class BHWhiteChatViewController: UIViewController {}
