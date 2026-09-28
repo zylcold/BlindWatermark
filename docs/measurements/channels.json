@@ -18,7 +18,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 8,
-    "pythonSeconds": 0.281,
+    "pythonSeconds": 0.48,
     "swiftExit": 0
   },
   {
@@ -40,7 +40,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 8,
-    "pythonSeconds": 0.331,
+    "pythonSeconds": 0.354,
     "swiftExit": 0
   },
   {
@@ -62,7 +62,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 7,
-    "pythonSeconds": 0.256,
+    "pythonSeconds": 0.29,
     "swiftExit": 0
   },
   {
@@ -84,7 +84,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 1.038,
+    "pythonSeconds": 0.279,
     "swiftExit": 0
   },
   {
@@ -106,7 +106,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 19,
-    "pythonSeconds": 0.745,
+    "pythonSeconds": 0.339,
     "swiftExit": 0
   },
   {
@@ -128,7 +128,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 4,
-    "pythonSeconds": 0.354,
+    "pythonSeconds": 0.355,
     "swiftExit": 0
   },
   {
@@ -150,7 +150,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 0,
-    "pythonSeconds": 0.351,
+    "pythonSeconds": 0.344,
     "swiftExit": 0
   },
   {
@@ -172,7 +172,7 @@
     "passed": true,
     "minObs": 0,
     "correctedBits": 17,
-    "pythonSeconds": 0.338,
+    "pythonSeconds": 0.261,
     "swiftExit": 1
   },
   {
@@ -194,7 +194,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.392,
+    "pythonSeconds": 0.331,
     "swiftExit": 0
   },
   {
@@ -216,7 +216,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.374,
+    "pythonSeconds": 0.343,
     "swiftExit": 0
   },
   {
@@ -238,7 +238,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 7,
-    "pythonSeconds": 0.265,
+    "pythonSeconds": 0.284,
     "swiftExit": 0
   },
   {
@@ -260,7 +260,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 7,
-    "pythonSeconds": 0.235,
+    "pythonSeconds": 0.301,
     "swiftExit": 0
   },
   {
@@ -282,7 +282,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 19,
-    "pythonSeconds": 0.376,
+    "pythonSeconds": 0.36,
     "swiftExit": 0
   },
   {
@@ -304,7 +304,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 4,
-    "pythonSeconds": 0.28,
+    "pythonSeconds": 0.304,
     "swiftExit": 0
   },
   {
@@ -326,7 +326,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 0,
-    "pythonSeconds": 0.293,
+    "pythonSeconds": 0.363,
     "swiftExit": 0
   },
   {
@@ -348,7 +348,7 @@
     "passed": true,
     "minObs": 0,
     "correctedBits": 11,
-    "pythonSeconds": 0.249,
+    "pythonSeconds": 0.252,
     "swiftExit": 1
   },
   {
@@ -370,7 +370,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.309,
+    "pythonSeconds": 0.382,
     "swiftExit": 0
   },
   {
@@ -392,7 +392,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.314,
+    "pythonSeconds": 0.352,
     "swiftExit": 0
   },
   {
@@ -414,7 +414,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 5,
-    "pythonSeconds": 0.173,
+    "pythonSeconds": 0.228,
     "swiftExit": 0
   },
   {
@@ -436,7 +436,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.168,
+    "pythonSeconds": 0.247,
     "swiftExit": 0
   },
   {
@@ -458,7 +458,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 12,
-    "pythonSeconds": 0.301,
+    "pythonSeconds": 0.363,
     "swiftExit": 0
   },
   {
@@ -480,7 +480,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 2,
-    "pythonSeconds": 0.305,
+    "pythonSeconds": 0.336,
     "swiftExit": 0
   },
   {
@@ -502,7 +502,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 0,
-    "pythonSeconds": 0.29,
+    "pythonSeconds": 0.451,
     "swiftExit": 0
   },
   {
@@ -524,7 +524,7 @@
     "passed": true,
     "minObs": 0,
     "correctedBits": 21,
-    "pythonSeconds": 0.247,
+    "pythonSeconds": 0.257,
     "swiftExit": 1
   },
   {
@@ -546,7 +546,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 30,
-    "pythonSeconds": 0.312,
+    "pythonSeconds": 0.392,
     "swiftExit": 0
   },
   {
@@ -568,7 +568,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 30,
-    "pythonSeconds": 0.307,
+    "pythonSeconds": 0.542,
     "swiftExit": 0
   },
   {
@@ -590,7 +590,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 34,
-    "pythonSeconds": 0.277,
+    "pythonSeconds": 0.489,
     "swiftExit": 0
   },
   {
@@ -612,7 +612,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 35,
-    "pythonSeconds": 0.282,
+    "pythonSeconds": 0.512,
     "swiftExit": 0
   },
   {
@@ -634,7 +634,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 26,
-    "pythonSeconds": 0.311,
+    "pythonSeconds": 0.364,
     "swiftExit": 0
   },
   {
@@ -656,7 +656,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 31,
-    "pythonSeconds": 0.213,
+    "pythonSeconds": 0.305,
     "swiftExit": 0
   },
   {
@@ -678,7 +678,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 11,
-    "pythonSeconds": 0.35,
+    "pythonSeconds": 0.421,
     "swiftExit": 0
   },
   {
@@ -700,7 +700,7 @@
     "passed": true,
     "minObs": null,
     "correctedBits": null,
-    "pythonSeconds": 0.575,
+    "pythonSeconds": 0.607,
     "swiftExit": 1
   },
   {
@@ -722,7 +722,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 7,
-    "pythonSeconds": 0.286,
+    "pythonSeconds": 0.354,
     "swiftExit": 0
   },
   {
@@ -744,7 +744,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 5,
-    "pythonSeconds": 0.172,
+    "pythonSeconds": 0.22,
     "swiftExit": 0
   },
   {
@@ -766,7 +766,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 5,
-    "pythonSeconds": 0.164,
+    "pythonSeconds": 0.233,
     "swiftExit": 0
   },
   {
@@ -788,7 +788,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.169,
+    "pythonSeconds": 0.232,
     "swiftExit": 0
   },
   {
@@ -810,7 +810,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 13,
-    "pythonSeconds": 0.221,
+    "pythonSeconds": 0.28,
     "swiftExit": 0
   },
   {
@@ -832,7 +832,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 4,
-    "pythonSeconds": 0.209,
+    "pythonSeconds": 0.255,
     "swiftExit": 0
   },
   {
@@ -854,7 +854,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 0,
-    "pythonSeconds": 0.297,
+    "pythonSeconds": 0.406,
     "swiftExit": 0
   },
   {
@@ -876,7 +876,7 @@
     "passed": true,
     "minObs": 0,
     "correctedBits": 10,
-    "pythonSeconds": 0.234,
+    "pythonSeconds": 0.249,
     "swiftExit": 1
   },
   {
@@ -898,7 +898,7 @@
     "passed": true,
     "minObs": 10,
     "correctedBits": 4,
-    "pythonSeconds": 0.307,
+    "pythonSeconds": 0.349,
     "swiftExit": 0
   },
   {
@@ -920,7 +920,7 @@
     "passed": true,
     "minObs": 10,
     "correctedBits": 4,
-    "pythonSeconds": 0.31,
+    "pythonSeconds": 0.353,
     "swiftExit": 0
   },
   {
@@ -942,7 +942,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.386,
+    "pythonSeconds": 0.282,
     "swiftExit": 0
   },
   {
@@ -964,7 +964,7 @@
     "passed": true,
     "minObs": 12,
     "correctedBits": 6,
-    "pythonSeconds": 0.389,
+    "pythonSeconds": 0.278,
     "swiftExit": 0
   },
   {
@@ -986,7 +986,7 @@
     "passed": true,
     "minObs": 10,
     "correctedBits": 8,
-    "pythonSeconds": 0.475,
+    "pythonSeconds": 0.347,
     "swiftExit": 0
   },
   {
@@ -1008,7 +1008,7 @@
     "passed": true,
     "minObs": 10,
     "correctedBits": 5,
-    "pythonSeconds": 0.273,
+    "pythonSeconds": 0.296,
     "swiftExit": 0
   },
   {
@@ -1030,7 +1030,7 @@
     "passed": true,
     "minObs": 10,
     "correctedBits": 0,
-    "pythonSeconds": 0.305,
+    "pythonSeconds": 0.384,
     "swiftExit": 0
   },
   {
@@ -1052,7 +1052,7 @@
     "passed": true,
     "minObs": 0,
     "correctedBits": 10,
-    "pythonSeconds": 0.199,
+    "pythonSeconds": 0.215,
     "swiftExit": 1
   },
   {
@@ -1060,7 +1060,7 @@
     "channel": "auto-down",
     "passed": true,
     "estimatedScale": 0.837885,
-    "pythonSeconds": 13.185,
+    "pythonSeconds": 16.284,
     "swiftExit": 0
   },
   {
@@ -1068,7 +1068,7 @@
     "channel": "auto-up",
     "passed": true,
     "estimatedScale": 1.172776,
-    "pythonSeconds": 30.236,
+    "pythonSeconds": 40.075,
     "swiftExit": 0
   }
 ]

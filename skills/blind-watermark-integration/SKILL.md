@@ -38,6 +38,8 @@ python3 tools/benchmark_channels.py --input-dir /private/tmp/bw-v6-demo-samples 
 
 sweep使用XcodeBuildMCP和sim-use原始像素截图，需要预先安装和授权设备。对纯色/聊天/文字/照片/深色/混排各自测试；原图、裁切、两次JPEG、0.837/1.173非粗网格比例、黑/白边框应组合测试并核对全部字段。深色内容不能被黑边规则误删，小图须拒答。实际IM转发还要用目标客户端人工转发的文件复测，Pillow质量系数不代表微信内部参数。
 
-最少5次不重叠物理cell观测与BCH/CRC/合法字段必须同时满足。量化为0的cell仍计数但信号为0。不得用CRC通过绕过TOO_SMALL，不得多候选首个即返回。解码报 `crcStatus=OK(完整性自检,未验签)`，不报mac。
+解码 API 与 CLI 的有效 scale 范围均为闭区间 0.5…1.5；非有限或越界参数提前拒绝。有限 Chase 的两个重试候选按各自实际 pilotScore 降序选取，同分保留原顺序。
+
+最少5次不重叠物理cell观测与BCH/CRC/合法字段必须同时满足。量化为0的cell仍计数但信号为0。证据计数只包含完整落在内容矩形内的 cell：由 RGB 非均匀行列确定矩形，排除外侧完全均匀的 padding，不改变坐标或信号统计；内部 JPEG 零差分仍计数。该规则不保证识别纹理框或任意无水印区域。不得用CRC通过绕过TOO_SMALL，不得多候选首个即返回。解码报 `crcStatus=OK(完整性自检,未验签)`，不报mac。
 
 编解码逻辑变更同步Swift/Python，布局/参数变更同步README中英和两个skill，并更新黄金向量及可复现测试。实际数字和边界见 [协议记录](../../docs/v6-protocol.md)。截图解析流程见 [解析 skill](../blind-watermark/SKILL.md)，此处只负责接入与验收。

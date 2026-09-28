@@ -61,7 +61,7 @@ python3 tools/bwdecode.py shot.jpg --layout
 
 Python 工具沿用 numpy/Pillow，运行时 Swift 库不依赖它们。CLI 只接受 `--protocol v6`；`--auto` 等同默认几何搜索。`--plane` 必须与接入端一致，默认 chroma；luma 是可见性实验档，不能套用 chroma 的观感结论。
 
-默认先搜 1.0，再搜 0.50…1.50 的 21 档粗网格及局部连续精搜。已知比例用 `--scale` 限制搜索。`--offset X,Y` 指定非负像素相位且关闭自动黑边裁剪，仍搜索 tile 平移；没有指定时相位相对于裁剪后的图像。默认只保守裁均匀暗边，白边/不规则边框由几何搜索处理，不能保证所有边框都能恢复。
+默认先搜 1.0，再搜 0.50…1.50 的 21 档粗网格及局部连续精搜。已知比例用 `--scale` 限制搜索。解码 API 与 CLI 的有效 scale 范围均为闭区间 0.5…1.5；非有限或越界参数提前拒绝。有限 Chase 的两个重试候选按各自实际 pilotScore 降序选取，同分保留原顺序。`--offset X,Y` 指定非负像素相位且关闭自动黑边裁剪，仍搜索 tile 平移；没有指定时相位相对于裁剪后的图像。默认只保守裁均匀暗边，白边/不规则边框由几何搜索处理，不能保证所有边框都能恢复。
 
 第一行含 `protocol=v6`、27 字节 `payload`、plane、phase、tileShift、scale、correctedBits、softRecovery、pilotScore、minObs、avgObs、`|z|中位`，必要时加 `trim=(左,上,右,下)`。成功且带 `--layout` 时第二行输出完整字段，结尾固定为：
 
@@ -71,7 +71,7 @@ crcStatus=OK(完整性自检,未验签)
 
 没有 `mac=`。没有 BCH + CRC-valid 候选输出 `NO`，多个不同有效载荷输出 `ambiguous`，均 exit 1。参数错误 exit 2，不回退历史协议。
 
-**每个码字 bit 至少 5 次不重叠物理 cell 观测才解读字段。** JPEG 将差分量化成 0 的 cell 仍计数，但其信号贡献为 0；观测数不是置信度。恢复同时必须通过 BCH、合法字段、CRC，不能仅凭面积放行。小图可能通过 CRC 但仍输出 `TOO_SMALL`，带 `--layout` 时 exit 1、无字段；不带时只报告诊断、警告并 exit 0。
+**每个码字 bit 至少 5 次不重叠物理 cell 观测才解读字段。** JPEG 将差分量化成 0 的 cell 仍计数，但其信号贡献为 0；观测数不是置信度。证据计数只包含完整落在内容矩形内的 cell：由 RGB 非均匀行列确定矩形，排除外侧完全均匀的 padding，不改变坐标或信号统计；内部 JPEG 零差分仍计数。该规则不保证识别纹理框或任意无水印区域。恢复同时必须通过 BCH、合法字段、CRC，不能仅凭面积放行。小图可能通过 CRC 但仍输出 `TOO_SMALL`，带 `--layout` 时 exit 1、无字段；不带时只报告诊断、警告并 exit 0。
 
 ## 验证与样本
 

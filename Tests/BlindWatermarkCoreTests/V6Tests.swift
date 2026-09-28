@@ -140,6 +140,41 @@ final class V6Tests: XCTestCase {
         XCTAssertNil(V6Codec.decodeBest(plain, scales: [1]))
     }
 
+    func testScaleBoundariesAndPaddingEvidence() throws {
+        let small = shot(width: V6Codec.tileWidth, height: V6Codec.tileHeight)
+        for scale in [0, -1, Double.nan, .infinity, 1e-320, 0.499, 1.501] {
+            XCTAssertNil(V6Codec.decode(small, scale: scale))
+        }
+        for color: UInt8 in [0, 40, 245, 255] {
+            var framed = RGBAImage(width: 1632, height: 1536)
+            framed.fill((color, color, color, 255))
+            for row in 0..<small.height {
+                let destination = ((row + 512) * framed.width + 544) * 4
+                let source = row * small.width * 4
+                framed.pixels.replaceSubrange(destination..<(destination + small.width * 4),
+                    with: small.pixels[source..<(source + small.width * 4)])
+            }
+            let result = try XCTUnwrap(V6Codec.decode(framed, searchTile: true))
+            XCTAssertEqual(result.payload, payload)
+            XCTAssertEqual(result.minObservations, 2)
+            XCTAssertFalse(result.hasSufficientEvidence)
+        }
+    }
+
+    func testChaseRanksIndividualCandidates() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("docs/samples/v6-photo-chase-ranking.png")
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let image = try XCTUnwrap(RGBAImage(cgImage: try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))))
+        let result = try XCTUnwrap(V6Codec.decodeBest(image, scales: [1]))
+        XCTAssertEqual(result.payload?.bytes.map { String(format: "%02x", $0) }.joined(),
+                       "f6eedbeaadad4616b0852fa0fbf9b17f2a0040066fc75428010700")
+        XCTAssertTrue(result.softRecoveryUsed)
+        XCTAssertEqual(result.correctedBits, 42)
+        XCTAssertTrue(result.hasSufficientEvidence)
+    }
+
     func testAmbiguousCandidatesAreRejected() throws {
         let ctx = V6Codec.Context(stats: .init(), scale: 1, x: 0, y: 0, shifts: [])
         let other = WatermarkPayload(uid: 1, timestampOffset: 0, buildMinuteOffset: 0, pageCode: "other")!

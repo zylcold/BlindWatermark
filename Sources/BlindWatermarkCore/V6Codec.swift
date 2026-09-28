@@ -11,6 +11,7 @@ public enum V6Codec {
     public static let tileHeight = cellHeight * rows
     public static let defaultDelta: UInt8 = 4
     public static let minObservationsPerBit = 5
+    public static let supportedScaleRange = 0.5...1.5
     public static let defaultScales = Array(stride(from: 0.50, through: 1.501, by: 0.05))
     // 固定实验预算；不是正确率承诺。镜像实现与回归样本共同约束这些值。
     static let observationClip = 12.0
@@ -103,6 +104,7 @@ public enum V6Codec {
         var sums = [Double](repeating: 0, count: cells)
         var squares = [Double](repeating: 0, count: cells)
         var counts = [Int](repeating: 0, count: cells)
+        var evidenceCounts = [Int](repeating: 0, count: cells)
     }
 
     struct Context {
@@ -131,9 +133,23 @@ public enum V6Codec {
         let width: Int
         let height: Int
         let values: [Double]
+        let evidenceBounds: (left: Int, top: Int, right: Int, bottom: Int)
         init(_ image: RGBAImage, plane: WatermarkPlane) {
-            width = image.width
-            height = image.height
+            let width = image.width, height = image.height
+            self.width = width
+            self.height = height
+            // 仅排除外侧 RGB 完全均匀的行列，不把内部量化擦除误判为无观测。
+            func differs(_ a: Int, _ b: Int) -> Bool {
+                (0..<3).contains { image.pixels[a * 4 + $0] != image.pixels[b * 4 + $0] }
+            }
+            let activeRows = (0..<height).filter { y in
+                (0..<width).contains { differs(y * width + $0, y * width) }
+            }
+            let activeColumns = (0..<width).filter { x in
+                (0..<height).contains { differs($0 * width + x, x) }
+            }
+            evidenceBounds = (activeColumns.first ?? width, activeRows.first ?? height,
+                              (activeColumns.last.map { $0 + 1 }) ?? 0, (activeRows.last.map { $0 + 1 }) ?? 0)
             let feature = image.featureBuffer(plane)
             var sums = [Double](repeating: 0, count: (width + 1) * (height + 1))
             for y in 0..<height {
@@ -161,7 +177,7 @@ public enum V6Codec {
     }
 
     private static func accumulate(_ integral: Integral, scale: Double, x: Double, y: Double) -> Stats? {
-        guard scale.isFinite, scale > 0, x.isFinite, y.isFinite, x >= 0, y >= 0 else { return nil }
+        guard scale.isFinite, supportedScaleRange.contains(scale), x.isFinite, y.isFinite, x >= 0, y >= 0 else { return nil }
         let w = Double(cellWidth) * scale, h = Double(cellHeight) * scale
         guard Double(integral.width) - x >= w, Double(integral.height) - y >= h else { return nil }
         let nx = Int((Double(integral.width) - x) / w), ny = Int((Double(integral.height) - y) / h)
@@ -170,14 +186,18 @@ public enum V6Codec {
             for col in 0..<nx {
                 let px = x + Double(col) * w, py = y + Double(row) * h
                 let difference = integral.mean(px, py, w / 2, h) - integral.mean(px + w / 2, py, w / 2, h)
-                // v6 计数的是不重叠 cell 的物理观测。JPEG 量化成 0 时仍保留擦除信息，
-                // z 保持为 0，不伪造方向或置信度；恢复必须通过 BCH 与 CRC。
-                // 限制文字/照片硬边缘的支配力，保留符号；实际观测数仍按非重叠 cell 计数。
+                // clip 限制内容硬边缘支配力；内部量化擦除仍参与统计，保持零信号。
                 let d = max(-observationClip, min(observationClip, difference))
                 let index = (row % rows) * columns + col % columns
                 stats.sums[index] += d
                 stats.squares[index] += d * d
                 stats.counts[index] += 1
+                // 证据门槛独立于信号统计，外框不能替小裁片补足观测。
+                let bounds = integral.evidenceBounds
+                if px >= Double(bounds.left), py >= Double(bounds.top),
+                   px + w <= Double(bounds.right), py + h <= Double(bounds.bottom) {
+                    stats.evidenceCounts[index] += 1
+                }
             }
         }
         return stats
@@ -215,6 +235,8 @@ public enum V6Codec {
                               offsetX: Double = 0, offsetY: Double = 0, searchTile: Bool = false) -> Decoded? {
         guard image.width > 0, image.height > 0,
               image.pixels.count == image.width * image.height * 4 else { return nil }
+        guard scale.isFinite, supportedScaleRange.contains(scale),
+              offsetX.isFinite, offsetY.isFinite, offsetX >= 0, offsetY >= 0 else { return nil }
         let integral = Integral(image, plane: plane)
         guard let ctx = context(integral, scale: scale, x: offsetX, y: offsetY, searchTile: searchTile) else { return nil }
         return adjudicate(candidates([ctx]))
@@ -227,7 +249,7 @@ public enum V6Codec {
         let integral = Integral(image, plane: plane)
         func scan(_ values: [Double]) -> [Context] {
             var found = [Context]()
-            for scale in values where scale.isFinite && (0.5...1.5).contains(scale) {
+            for scale in values where scale.isFinite && supportedScaleRange.contains(scale) {
                 var best: Context?
                 for y in stride(from: 0.0, to: Double(cellHeight) * scale, by: 2) {
                     for x in stride(from: 0.0, to: Double(cellWidth) * scale, by: 4) {
@@ -275,6 +297,7 @@ public enum V6Codec {
             for shift in ctx.shifts where shift.score >= minimumPilotScore {
                 var scores = [Double](repeating: 0, count: 512)
                 var counts = [Int](repeating: 0, count: 512)
+                var evidenceCounts = [Int](repeating: 0, count: 512)
                 var sums = [Double](repeating: 0, count: 512)
                 var squares = [Double](repeating: 0, count: 512)
                 for row in 0..<rows {
@@ -282,6 +305,7 @@ public enum V6Codec {
                         let local = ((row - shift.y + rows) % rows) * columns + (col - shift.x + columns) % columns
                         let position = row * dataColumns + col, index = codeIndex(position)
                         counts[index] += ctx.stats.counts[local]
+                        evidenceCounts[index] += ctx.stats.evidenceCounts[local]
                         sums[index] += ctx.stats.sums[local] * (polarity(position) ? -1 : 1)
                         squares[index] += ctx.stats.squares[local]
                     }
@@ -291,15 +315,16 @@ public enum V6Codec {
                     let variance = max(observationVarianceFloor, squares[index] / n - mean * mean)
                     scores[index] = mean / sqrt(variance / n)
                 }
-                if let hit = attempt(scores, counts, ctx, shift.x, shift.y, shift.score, flips: []) {
+                if let hit = attempt(scores, evidenceCounts, ctx, shift.x, shift.y, shift.score, flips: []) {
                     found.append(hit)
                 } else {
-                    pending.append((ctx, shift.x, shift.y, shift.score, scores, counts))
+                    pending.append((ctx, shift.x, shift.y, shift.score, scores, evidenceCounts))
                 }
             }
         }
         if found.isEmpty {
-            for (ctx, x, y, pilot, scores, counts) in pending.prefix(2) {
+            // 按候选本身排名，避免同一 context 的低分平移挤掉其他高分候选。
+            for (ctx, x, y, pilot, scores, counts) in pending.sorted(by: { $0.3 > $1.3 }).prefix(2) {
                 let ranked = Array(scores.indices.sorted { abs(scores[$0]) < abs(scores[$1]) }.prefix(softBits))
                 for a in ranked.indices {
                     if let hit = attempt(scores, counts, ctx, x, y, pilot, flips: [ranked[a]]) { found.append(hit) }

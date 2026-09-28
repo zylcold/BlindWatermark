@@ -636,9 +636,17 @@ def _at(sat,x,y):
     return (sat[iy,ix]*(1-fx)+sat[iy,nx]*fx)*(1-fy)+(sat[ny,ix]*(1-fx)+sat[ny,nx]*fx)*fy
 
 
-def _accumulate(sat,scale,x,y):
+def evidence_bounds(image):
+    """外侧纯色 padding 不增加证据；不改变几何坐标或内部擦除统计。"""
+    rgb=image[:,:,:3]
+    rows=np.flatnonzero(np.any(rgb != rgb[:,:1,:],axis=(1,2)))
+    cols=np.flatnonzero(np.any(rgb != rgb[:1,:,:],axis=(0,2)))
+    return (int(cols[0]),int(rows[0]),int(cols[-1])+1,int(rows[-1])+1) if len(rows) and len(cols) else (0,0,0,0)
+
+
+def _accumulate(sat,scale,x,y,bounds):
     h,w=sat.shape[0]-1,sat.shape[1]-1
-    if not all(math.isfinite(v) for v in (scale,x,y)) or scale<=0 or x<0 or y<0:
+    if not all(math.isfinite(v) for v in (scale,x,y)) or not 0.5<=scale<=1.5 or x<0 or y<0:
         return None
     cw,ch=CELL_WIDTH*scale,CELL_HEIGHT*scale
     if w-x<cw or h-y<ch:return None
@@ -652,7 +660,10 @@ def _accumulate(sat,scale,x,y):
     indices=(np.arange(ny)[:,None]%ROWS)*COLUMNS+np.arange(nx)[None,:]%COLUMNS
     ids=indices.ravel()
     values=d.ravel()
-    return (np.bincount(ids,weights=values,minlength=COLUMNS*ROWS),np.bincount(ids,weights=values*values,minlength=COLUMNS*ROWS),np.bincount(ids,minlength=COLUMNS*ROWS))
+    left,top,right,bottom=bounds
+    valid=(xs>=left)&(ys>=top)&(xs+cw<=right)&(ys+ch<=bottom)
+    evidence=np.bincount(ids[valid.ravel()],minlength=COLUMNS*ROWS)
+    return (np.bincount(ids,weights=values,minlength=COLUMNS*ROWS),np.bincount(ids,weights=values*values,minlength=COLUMNS*ROWS),np.bincount(ids,minlength=COLUMNS*ROWS),evidence)
 
 
 @dataclass
@@ -666,10 +677,10 @@ class Context:
     def score(self):return self.shifts[0][2] if self.shifts else 0
 
 
-def _context(sat,scale,x,y,search_tile=True):
-    stats=_accumulate(sat,scale,x,y)
+def _context(sat,scale,x,y,bounds,search_tile=True):
+    stats=_accumulate(sat,scale,x,y,bounds)
     if stats is None:return None
-    sums,squares,counts=stats
+    sums,squares,counts,_=stats
     means=np.divide(sums,counts,out=np.zeros(COLUMNS*ROWS),where=counts>0)
     observed=PILOT_OBSERVED if search_tile else PILOT_OBSERVED[:1]
     values=means[observed]
@@ -733,11 +744,11 @@ def _candidates(contexts):
         for x,y,pilot in ctx.shifts:
             if pilot<MIN_PILOT_SCORE:continue
             local=np.array([((row-y)%ROWS)*COLUMNS+(col-x)%COLUMNS for row in range(ROWS) for col in range(DATA_COLUMNS)])
-            sums,squares,observations=ctx.stats
+            sums,squares,observations,evidence=ctx.stats
             n=np.bincount(CODE_INDICES,weights=observations[local],minlength=512)
             folded=np.bincount(CODE_INDICES,weights=sums[local]*POLARITIES,minlength=512)
             squared=np.bincount(CODE_INDICES,weights=squares[local],minlength=512)
-            counts=n.astype(int)
+            counts=np.bincount(CODE_INDICES,weights=evidence[local],minlength=512).astype(int)
             mean=np.divide(folded,n,out=np.zeros(512),where=n>0)
             variance=np.maximum(OBSERVATION_VARIANCE_FLOOR,np.divide(squared,n,out=np.zeros(512),where=n>0)-mean*mean)
             scores=mean*np.sqrt(n/variance)
@@ -745,7 +756,7 @@ def _candidates(contexts):
             if hit:found.append(hit)
             else:pending.append((ctx,x,y,pilot,scores,counts))
     if not found:
-        for ctx,x,y,pilot,scores,counts in pending[:2]:
+        for ctx,x,y,pilot,scores,counts in sorted(pending,key=lambda item:-item[3])[:2]:
             ranked=np.argsort(np.abs(scores),kind='stable')[:SOFT_BITS]
             for a,i in enumerate(ranked):
                 hit=_attempt(scores,counts,ctx,x,y,pilot,(i,))
@@ -757,12 +768,14 @@ def _candidates(contexts):
 
 
 def decode(image,plane='chroma',scale=1,offset_x=0,offset_y=0,search_tile=False):
+    if not all(math.isfinite(v) for v in (scale,offset_x,offset_y)) or not 0.5<=scale<=1.5 or offset_x<0 or offset_y<0:return None
     sat=integral_image(feature_plane(image,plane))
-    ctx=_context(sat,scale,offset_x,offset_y,search_tile)
+    ctx=_context(sat,scale,offset_x,offset_y,evidence_bounds(image),search_tile)
     return adjudicate(_candidates([ctx])) if ctx else None
 
 
 def decode_best(image,scales=None,plane='chroma'):
+    bounds=evidence_bounds(image)
     sat=integral_image(feature_plane(image,plane))
     def scan(values):
         found=[]
@@ -771,7 +784,7 @@ def decode_best(image,scales=None,plane='chroma'):
             best=None
             for y in np.arange(0,CELL_HEIGHT*scale,2):
                 for x in np.arange(0,CELL_WIDTH*scale,4):
-                    ctx=_context(sat,float(scale),float(x),float(y))
+                    ctx=_context(sat,float(scale),float(x),float(y),bounds)
                     if ctx and (best is None or ctx.score>best.score):best=ctx
             if best:found.append(best)
         return sorted(found,key=lambda c:-c.score)
@@ -781,7 +794,7 @@ def decode_best(image,scales=None,plane='chroma'):
             for dy in (-1,0,1):
                 for dx in (-2,0,2):
                     if seed.x+dx<0 or seed.y+dy<0:continue
-                    ctx=_context(sat,seed.scale,seed.x+dx,seed.y+dy)
+                    ctx=_context(sat,seed.scale,seed.x+dx,seed.y+dy,bounds)
                     if ctx:refined.append(ctx)
         return adjudicate(_candidates(sorted(refined,key=lambda c:-c.score)[:MAX_CONTEXTS]))
     if scales is not None:return finish(scan(scales))

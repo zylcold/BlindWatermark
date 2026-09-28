@@ -61,7 +61,7 @@ python3 tools/bwdecode.py shot.jpg --layout
 
 The Python tooling continues to use numpy/Pillow; the Swift runtime does not depend on them. Only `--protocol v6` is supported. `--auto` means the default geometry search. `--plane` must match the renderer, defaulting to chroma. Luma is an experimental visibility mode and does not inherit chroma visibility conclusions.
 
-Default decoding tries scale 1.0, then 21 coarse scales from 0.50…1.50 followed by local refinement. Use `--scale` when the ratio is known. Nonnegative `--offset X,Y` fixes pixel phase, disables dark-border trimming, and still searches tile shifts. Without it, phase is relative to the trimmed image. Only uniform dark borders are conservatively trimmed; white or irregular frames rely on geometry search and cannot always be recovered.
+Default decoding tries scale 1.0, then 21 coarse scales from 0.50…1.50 followed by local refinement. Use `--scale` when the ratio is known. Decoder APIs and the CLI accept only finite scales in the closed range 0.5…1.5. The two Chase retry candidates are ranked by their own pilotScore, preserving input order on ties. Nonnegative `--offset X,Y` fixes pixel phase, disables dark-border trimming, and still searches tile shifts. Without it, phase is relative to the trimmed image. Only uniform dark borders are conservatively trimmed; white or irregular frames rely on geometry search and cannot always be recovered.
 
 The first line reports `protocol=v6`, the 27-byte `payload`, plane, phase, tileShift, scale, correctedBits, softRecovery, pilotScore, minObs, avgObs, median absolute z, and optional `trim=(left,top,right,bottom)`. Successful `--layout` decoding prints the complete fields on the second line ending with:
 
@@ -71,7 +71,7 @@ crcStatus=OK(完整性自检,未验签)
 
 There is no `mac=` field. No BCH + CRC-valid candidate produces `NO`; multiple distinct valid payloads produce `ambiguous`. Both exit 1. Invalid arguments exit 2, with no historical fallback.
 
-**Every codeword bit needs at least five non-overlapping physical cell observations before fields are interpreted.** Cells quantized to zero by JPEG still count, but contribute zero signal. Observation count is not confidence. BCH, valid fields, and CRC must also pass. Small images may pass CRC yet produce `TOO_SMALL`: with `--layout`, exit 1 and no fields; without it, diagnostics and a warning only, exit 0.
+**Every codeword bit needs at least five non-overlapping physical cell observations before fields are interpreted.** Cells quantized to zero by JPEG still count, but contribute zero signal. Observation count is not confidence. Evidence counts include only cells fully inside the content rectangle, bounded by RGB-nonuniform rows and columns. Uniform outer padding is excluded without changing coordinates or signal statistics; internal JPEG erasures still count. This does not identify textured frames or arbitrary unwatermarked regions. BCH, valid fields, and CRC must also pass. Small images may pass CRC yet produce `TOO_SMALL`: with `--layout`, exit 1 and no fields; without it, diagnostics and a warning only, exit 0.
 
 ## Validation and samples
 

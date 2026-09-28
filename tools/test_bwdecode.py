@@ -113,8 +113,47 @@ class V6Checks(unittest.TestCase):
         dark=np.full((900,640,4),4,dtype=np.uint8);dark[:,:,3]=255
         self.assertEqual(b.trim_uniform_dark_border(dark)[1],(0,0,0,0))
 
+    def test_scale_boundaries_and_padding_evidence(self):
+        small=screenshot(b.TILE_WIDTH,b.TILE_HEIGHT)
+        for scale in [0,-1,float('nan'),float('inf'),1e-320,.499,1.501]:
+            self.assertIsNone(b.decode(small,scale=scale))
+        for scale in [.5,1.5]:
+            resized=np.array(Image.fromarray(small).resize((round(b.TILE_WIDTH*scale),round(b.TILE_HEIGHT*scale))))
+            self.assertIsNotNone(b.decode(resized,scale=scale))
+        swift=ROOT/'.build/release/bwdecode'
+        with tempfile.TemporaryDirectory() as folder:
+            for color in [0,40,245,255]:
+                for compressed in [False,True]:
+                    framed=np.full((1536,1632,4),color,dtype=np.uint8)
+                    framed[:,:,3]=255
+                    framed[512:1024,544:1088]=small
+                    if compressed:framed=jpeg(framed,76,2)
+                    result=b.decode_best(framed,[1])
+                    self.assertIsNotNone(result,(color,compressed))
+                    self.assertEqual(result.payload,PAYLOAD)
+                    self.assertLessEqual(result.best.min_obs,2)
+                    self.assertFalse(result.has_sufficient_evidence)
+                    path=Path(folder)/'frame.png';Image.fromarray(framed).save(path)
+                    output=subprocess.run([str(swift),str(path),'--scale','1','--offset','0,0','--layout'],capture_output=True,text=True,timeout=60)
+                    self.assertEqual(output.returncode,1,output.stdout)
+                    self.assertIn('TOO_SMALL',output.stdout)
+                    self.assertNotIn('uid=',output.stdout)
+            # 非 cell 对齐的框厚度，结合再次压缩和未知相位。
+            framed=np.full((1549,1649,4),245,dtype=np.uint8);framed[:,:,3]=255
+            framed[525:1037,561:1105]=small
+            for image in [framed,jpeg(framed,76,2)]:
+                result=b.decode_best(image,[1])
+                self.assertIsNotNone(result)
+                self.assertEqual(result.payload,PAYLOAD)
+                self.assertFalse(result.has_sufficient_evidence)
+                path=Path(folder)/'unaligned.png';Image.fromarray(image).save(path)
+                output=subprocess.run([str(swift),str(path),'--scale','1','--layout'],capture_output=True,text=True,timeout=60)
+                self.assertEqual(output.returncode,1,output.stdout)
+                self.assertIn('TOO_SMALL',output.stdout)
+                self.assertNotIn('uid=',output.stdout)
+
     def test_ambiguity(self):
-        ctx=b.Context((np.zeros(b.COLUMNS*b.ROWS),)*3,1,0,0,[])
+        ctx=b.Context((np.zeros(b.COLUMNS*b.ROWS),)*4,1,0,0,[])
         other=b.WatermarkPayload(1,0,0,'other')
         a=b.Candidate(PAYLOAD,0,False,ctx,0,0,1,10,10,20)
         c=b.Candidate(other,0,False,ctx,0,0,1,10,10,20)
@@ -131,6 +170,9 @@ class V6Checks(unittest.TestCase):
             self.assertIsNotNone(result,sample['file'])
             self.assertTrue(result.is_success and result.has_sufficient_evidence)
             self.assertEqual(result.payload.bytes.hex(),sample['payloadHex'])
+            if sample['file']=='v6-photo-chase-ranking.png':
+                self.assertTrue(result.best.soft)
+                self.assertEqual(result.best.corrected_bits,42)
             output=subprocess.run([str(swift),str(path),'--scale',str(sample['scale']),'--layout'],
                                   text=True,capture_output=True,timeout=60)
             self.assertEqual(output.returncode,0,output.stderr)

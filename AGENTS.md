@@ -45,8 +45,9 @@ python3 tools/benchmark_channels.py --input-dir /private/tmp/bw-v6-demo-samples 
 - tile544×512px，cell32×8px，17列×64行；16列数据（两份512位不同交织副本），最后1列是64位独立色度同步。码字索引/极性/导频序列/常量必须两端一致。
 - 默认delta4、chroma。整层RGBA恒定预乘alpha；伴色只能减小亮度残差，色度仍可见。luma是实验档。不得未经目标真机人工验收称不可见。改默认值要实测并同步文档/skill。
 - CRC24只是完整性自检，不是验签，不是身份认证。输出为`crcStatus=OK(完整性自检,未验签)`，没有HMAC或`mac=`。
-- **每个码字bit物理观测≥5**才解读字段，不允许CRC例外。量化为0的非重叠cell计数但其信号贡献为0，不伪造方向/置信度。不足报TOO_SMALL及minObs/avgObs/|z|中位，带--layoutexit1、无字段；不带只诊断警告。
+- **每个码字bit物理观测≥5**才解读字段，不允许CRC例外。量化为0的非重叠cell计数但其信号贡献为0，不伪造方向/置信度。证据计数只包含完整落在内容矩形内的 cell：由 RGB 非均匀行列确定矩形，排除外侧完全均匀的 padding，不改变坐标或信号统计；内部 JPEG 零差分仍计数。该规则不保证识别纹理框或任意无水印区域。不足报TOO_SMALL及minObs/avgObs/|z|中位，带--layoutexit1、无字段；不带只诊断警告。
 - 没有BCH+CRC-valid载荷报NO，多个不同有效载荷报ambiguous并拒答。有限Chase在低可靠6位上翻1/2位，收集全部所搜索候选再去重。不能首个CRC通过立即返回。
+- 解码 API 与 CLI 的有效 scale 范围均为闭区间 0.5…1.5；非有限或越界参数提前拒绝。有限 Chase 的两个重试候选按各自实际 pilotScore 降序选取，同分保留原顺序。
 - 默认几何搜索先1.0、再0.50…1.50共21档与图像跨度决定的局部精搜。粗筛按比例留最佳相位，避免同一比例挤满候选；0.837/1.173是回归比例。性能必须实测，不给推测倍数。
 - 显式--offset只允许非负有限像素相位，关闭黑边裁剪；未指定先裁再搜，phase相对裁后图。Swift/Python黑边阈值同义：近黑32、覆盖0.90、单边上限25%、内侧亮探针≥96且占比0.30、深度8。深色页面不能为了出结果强制裁掉。
 - 修改公共API与非平凡逻辑带可运行验证；编解码修改同步`V6Codec.swift`、`V6BCH.swift`与`tools/bwdecode.py`。swift test及python3 tools/test_bwdecode.py全绿，并同图对账。
