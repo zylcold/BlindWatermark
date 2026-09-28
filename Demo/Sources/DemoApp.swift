@@ -1,4 +1,3 @@
-import CryptoKit
 import SwiftUI
 import BlindWatermark
 import BlindWatermarkCore
@@ -8,7 +7,7 @@ import BlindWatermarkCore
 /// 只做两件事：装一个已知 payload 的水印；提供几种差异很大的页面，用来对比
 /// 水印在不同内容密度、不同底色上的解码余量。
 ///
-/// `xcrun simctl launch` 时用 `SIMCTL_CHILD_BW_PAGE=<名字>` 直接打开某一页，方便脚本逐页刷。
+/// 通过启动环境变量 `BW_PAGE=<名字>` 直接打开某一页，方便脚本逐页验证。
 @main
 struct DemoApp: App {
     var body: some Scene {
@@ -18,99 +17,25 @@ struct DemoApp: App {
     }
 }
 
-/// 演示 256 bit 推荐布局：uid + Unix 秒 + 页面短码 + 标签 + mac。
-/// 换页时用 `Watermark.update` 重画图案 —— 相位不变，解码端无感。
+/// v6 离线字段演示，BW_DELTA / BW_PLANE 仅用于验收对照。
 enum DemoWatermark {
-    static let keyHex = "00112233445566778899aabbccddeeff"
     static let demoUID: UInt32 = 0xDEAD_BEEF
-    static let demoTag: UInt32 = 1
-
-    /// `BW_PROTOCOL=v52` 切到 v5.2 紧凑协议（默认 v4）；`BW_SYNC=pn|separated` 选实验导频档。
-    static var usesV52: Bool {
-        let value = ProcessInfo.processInfo.environment["BW_PROTOCOL"]?.lowercased()
-        return value == "v52" || value == "v5.2"
-    }
-
+    static let demoApp: UInt16 = 1
     static func install(page: DemoPage) {
         let env = ProcessInfo.processInfo.environment
-        let plane = env["BW_PLANE"].flatMap(WatermarkPlane.init(rawValue:)) ?? .chroma
-        let delta = env["BW_DELTA"].flatMap({ UInt8($0) })
-        if usesV52 {
-            guard let compact = compactPayload(page: page) else { fatalError("v5.2 payload 不合法") }
-            // v5.2 默认 delta=4（可见色差减半），v4 保持历史默认 8；两者都以 BW_DELTA 覆盖。
-            Watermark.installV52(
-                payload: compact,
-                delta: delta ?? 4,
-                plane: plane,
-                sync: env["BW_SYNC"].flatMap(V52SyncMode.init(rawValue:)) ?? .none
-            )
-            return
-        }
-        let payload = self.payload(page: page)
-        if let delta {
-            Watermark.install(payload: payload, delta: delta, plane: plane)
-        } else {
-            Watermark.install(payload: payload, plane: plane)
-        }
+        Watermark.install(payload: payload(page: page),
+                          delta: env["BW_DELTA"].flatMap(UInt8.init) ?? V6Codec.defaultDelta,
+                          plane: env["BW_PLANE"].flatMap(WatermarkPlane.init(rawValue:)) ?? .chroma)
     }
-
-    static func update(page: DemoPage) {
-        if usesV52 {
-            guard let compact = compactPayload(page: page) else { return }
-            Watermark.updateV52(payload: compact)
-            return
-        }
-        Watermark.update(payload: payload(page: page))
+    static func update(page: DemoPage) { Watermark.update(payload: payload(page: page)) }
+    private static func payload(page: DemoPage) -> WatermarkPayload {
+        let now = UInt64(max(Double(WatermarkPayload.timestampEpoch), Date().timeIntervalSince1970))
+        return WatermarkPayload(uid: demoUID, timestamp: now, buildTime: now,
+                                pageClassName: page.className, app: demoApp,
+                                note: compactNote(ProcessInfo.processInfo.environment["BW_NOTE"] ?? ""))!
     }
-
-    /// v5.2 的时间字段是 UTC 2026-01-01 起的秒 / 分钟偏移，demo 直接给当前时间；
-    /// note 只接受 `[a-z0-9_]` 且最多 6 字符 —— `BW_NOTE` 先归一化，否则 init 返回 nil。
-    private static func compactPayload(page: DemoPage) -> WatermarkPayloadV52? {
-        let now = UInt64(max(0, Date().timeIntervalSince1970))
-        return WatermarkPayloadV52(
-            uid: demoUID,
-            timestamp: now,
-            buildTime: now,
-            pageClassName: page.className,
-            app: UInt16(demoTag),
-            note: compactNote(ProcessInfo.processInfo.environment["BW_NOTE"] ?? "")
-        )
-    }
-
     static func compactNote(_ raw: String) -> String {
-        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789_")
-        return String(raw.lowercased().filter { allowed.contains($0) }.prefix(6))
-    }
-
-    /// layout v4：uid + Unix 秒 + build + 20 字符页面短码 + note + 校验值。
-    /// build 与 note 都是外部传入（真实项目里来自 CI 环境变量 / 打包脚本）：
-    /// `SIMCTL_CHILD_BW_BUILD=202609161722 SIMCTL_CHILD_BW_NOTE="hotfix-3"`。
-    private static func payload(page: DemoPage) -> [UInt8] {
-        let env = ProcessInfo.processInfo.environment
-        let timestamp = UInt32(max(0, min(Date().timeIntervalSince1970, Double(UInt32.max))))
-        let build = UInt64(env["BW_BUILD"] ?? "") ?? 0
-        let note = env["BW_NOTE"] ?? ""
-        // `BW_SELFCHECK=1` 模拟"无密钥部署"：校验值位置放公开自检值，解码端没有密钥也能裁剪自愈。
-        if env["BW_SELFCHECK"] == "1" {
-            return WatermarkPayload.selfChecked(
-                uid: demoUID,
-                timestamp: timestamp,
-                build: build,
-                pageClassName: page.className,
-                note: note,
-                app: demoTag
-            ).bytes
-        }
-        guard let key = SymmetricKey(hex: keyHex) else { fatalError("demo key 不合法") }
-        return WatermarkPayload(
-            uid: demoUID,
-            timestamp: timestamp,
-            build: build,
-            pageClassName: page.className,
-            note: note,
-            app: demoTag,
-            key: key
-        ).bytes
+        String(raw.lowercased().filter { "abcdefghijklmnopqrstuvwxyz0123456789_".contains($0) }.prefix(6))
     }
 }
 
@@ -162,9 +87,7 @@ struct PayloadFooter: View {
     let page: DemoPage
 
     var body: some View {
-        Text(DemoWatermark.usesV52
-             ? "v5.2  uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  page=\(String(PageNameCodec.code(for: page.className).prefix(8)))  app=\(DemoWatermark.demoTag)  note=\(DemoWatermark.compactNote(ProcessInfo.processInfo.environment["BW_NOTE"] ?? ""))"
-             : "uid=0x\(String(format: "%08X", DemoWatermark.demoUID))  \(page.className) → \(PageNameCodec.code(for: page.className))  app=\(DemoWatermark.demoTag)")
+        Text("v6 uid=0x\(String(format: "%08X", DemoWatermark.demoUID)) page=\(PageNameCodec.code(for: page.className)) app=\(DemoWatermark.demoApp)")
             .font(.caption2.monospaced())
             .foregroundStyle(.secondary)
     }
@@ -188,7 +111,6 @@ struct RootView: View {
         }
         .onAppear {
             DemoWatermark.install(page: selection)
-            selection = selection   // 触发一次 onChange，确保首屏也带页面短码
         }
         .onChange(of: selection) { page in
             DemoWatermark.update(page: page)

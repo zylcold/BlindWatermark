@@ -1,0 +1,46 @@
+[
+  {
+    "file": "v6-mixed-original.png",
+    "scale": 1,
+    "payloadHex": "f6eedbea9daf4616b8852fb8e5301c73280040066fc72c77da0400",
+    "uid": 3735928559,
+    "timestamp": 1790583801,
+    "buildTime": 1790583780,
+    "page": "mixedfee",
+    "app": 1,
+    "note": ""
+  },
+  {
+    "file": "v6-mixed-crop-scale0837-q76-black.png",
+    "scale": 0.837,
+    "payloadHex": "f6eedbea9daf4616b8852fb8e5301c73280040066fc72c77da0400",
+    "uid": 3735928559,
+    "timestamp": 1790583801,
+    "buildTime": 1790583780,
+    "page": "mixedfee",
+    "app": 1,
+    "note": ""
+  },
+  {
+    "file": "v6-photo-crop-q76-white.png",
+    "scale": 1,
+    "payloadHex": "f6eedbeaadad4616b0852fa0fbf9b17f2a0040066fc75428010700",
+    "uid": 3735928559,
+    "timestamp": 1790583770,
+    "buildTime": 1790583720,
+    "page": "photogri",
+    "app": 1,
+    "note": ""
+  },
+  {
+    "file": "v6-photo-chase-ranking.png",
+    "scale": 1,
+    "payloadHex": "f6eedbeaadad4616b0852fa0fbf9b17f2a0040066fc75428010700",
+    "uid": 3735928559,
+    "timestamp": 1790583770,
+    "buildTime": 1790583720,
+    "page": "photogri",
+    "app": 1,
+    "note": ""
+  }
+]

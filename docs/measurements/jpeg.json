@@ -1,0 +1,331 @@
+{
+  "kind": "native-simulator",
+  "delta": 4,
+  "plane": "chroma",
+  "records": [
+    {
+      "page": "plain",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.227
+    },
+    {
+      "page": "plain",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.257
+    },
+    {
+      "page": "plain",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.203
+    },
+    {
+      "page": "plain",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.214
+    },
+    {
+      "page": "plain",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.243
+    },
+    {
+      "page": "plain",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.248
+    },
+    {
+      "page": "white",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.221
+    },
+    {
+      "page": "white",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.228
+    },
+    {
+      "page": "white",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.219
+    },
+    {
+      "page": "white",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.221
+    },
+    {
+      "page": "white",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.226
+    },
+    {
+      "page": "white",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.225
+    },
+    {
+      "page": "text",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.207
+    },
+    {
+      "page": "text",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.222
+    },
+    {
+      "page": "text",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.21
+    },
+    {
+      "page": "text",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.227
+    },
+    {
+      "page": "text",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.188
+    },
+    {
+      "page": "text",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.226
+    },
+    {
+      "page": "photo",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.374
+    },
+    {
+      "page": "photo",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.227
+    },
+    {
+      "page": "photo",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.241
+    },
+    {
+      "page": "photo",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.227
+    },
+    {
+      "page": "photo",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.235
+    },
+    {
+      "page": "photo",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.25
+    },
+    {
+      "page": "dark",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.232
+    },
+    {
+      "page": "dark",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.242
+    },
+    {
+      "page": "dark",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.268
+    },
+    {
+      "page": "dark",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.308
+    },
+    {
+      "page": "dark",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.223
+    },
+    {
+      "page": "dark",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.241
+    },
+    {
+      "page": "mixed",
+      "quality": 95,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.204
+    },
+    {
+      "page": "mixed",
+      "quality": 90,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.239
+    },
+    {
+      "page": "mixed",
+      "quality": 80,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.223
+    },
+    {
+      "page": "mixed",
+      "quality": 76,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.241
+    },
+    {
+      "page": "mixed",
+      "quality": 70,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.232
+    },
+    {
+      "page": "mixed",
+      "quality": 60,
+      "passes": 2,
+      "success": true,
+      "correctedBits": 0,
+      "minObs": 22,
+      "seconds": 0.278
+    }
+  ]
+}

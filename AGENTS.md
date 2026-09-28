@@ -25,60 +25,34 @@ tools/bwdecode.py             Python 版解码器（镜像实现），tools/test
 ## 常用命令
 
 ```bash
-swift build                          # 编译全部 target
-swift test                           # 跑核心测试，macOS 本机即可，不需要模拟器
-swift run bwdecode shot.png --layout --key <hex> --pages Demo/pages.json
-swift run bwdecode shot.png --protocol v5.2 --layout --scale 0.837
-swift run bwdecode shot.png --auto --layout       # 历史 v4 相位/平面搜索
-swift run bwdecode shot.png --protocol auto --layout  # 显式混合探测：先 v5.2，再回退 v4
-Demo/sweep.sh [UDID] [delta] [luma|chroma] [v4|v52]   # 逐页截图解码对比，需 xcodegen + 已启动模拟器
+swift build
+swift test
+swift run bwdecode shot.jpg --layout
+swift run bwdecode shot.jpg --layout --scale 0.837
+python3 tools/test_bwdecode.py
+Demo/sweep.sh <UDID> 4 chroma
+python3 tools/benchmark_v6.py --input-dir /private/tmp/bw-v6-demo-samples
+python3 tools/benchmark_channels.py --input-dir /private/tmp/bw-v6-demo-samples --automatic
 ```
 
 ## 硬约束
 
-- **不新增第三方依赖。** 只用系统框架：Accelerate、CryptoKit、CoreGraphics、UIKit。
-- **平台下限 iOS 13 / macOS 11**（Demo 是 iOS 15）。用到的新 API 必须满足可用性，必要时 `@available` 兜底。
-- **编解码参数必须两端一致**：`payloadBits` / `plane` / `offset` / 载荷布局。任何一项不一致都会解出自洽但错误的结果。
-- **v4（512 bit / 64 字节）仍是默认布局并必须保留**：uid + Unix 秒 + build(12 位十进制) +
-  15 字符页面短码（96 bit 字段，90 bit 有效，低 6 位必须为 0）+ tag + 22 字节 note + 96 bit 校验值。
-  改字段边界 = 换协议、历史截图失效，必须显式说明影响面并同步 README / SKILL。
-- **`校验值` 字段是「校验值」，有三种语义**：HMAC-SHA256 截断（有服务端密钥）、SHA-256 截断（无密钥部署的公开自检值，
-  用 `WatermarkPayload.selfChecked` 构造）、全 0（没带校验值）。
-  **自检通过 ≠ 验签通过**：它只能拦住"对齐错了几 bit"的近似解，拦不住伪造。
-  对外输出必须分档（`mac=OK(验签)` / `mac=OK(自检,未验签)` / `mac=未签名` / `mac=未校验(需要 --key)` / `mac=BAD`），
-  不得把自检说成验签。
-- **裁剪自愈靠校验值裁决**：CLI 的阶梯是「严格校验器（HMAC 或自检值）→ 加 block 奇偶档 → 结构自检兜底」。
-  结构自检是兵底（实测全搜索空间里放过 4~17 个近似解），用到它必须打警告并如实报 `mac=未签名`。
-- **改载荷布局 = 破坏历史截图兼容。** 必须显式说明影响面，并同步 `README.md` 与 `skills/blind-watermark/SKILL.md`。
-- **v5.2 是显式 opt-in 的另一协议**：207 bit 信息字段（profile4 + uid32 + timestamp31 + buildTime24 +
-  page8/base37 42 + app14 + note6/base37 32 + CRC24 + reserved4），用 BCH(255,207,t6) 编码并追加一位整体偶校验形成 256 bit 码字；
-  `Watermark.installV52` / `--protocol v5.2` 才启用，默认渲染与历史解码仍走 v4。
-- v5.2 的时间字段是 UTC 2026-01-01 起的秒/分钟偏移；base37 字母表为 `a-z0-9_`，首字符为高位 radix digit，固定宽度右侧 `_` 补齐且解码去掉尾部补位；非法 radix 值、profile、reserved 或 CRC 必须拒绝。
-- v5.2 的 256 bit 码字在每个 256 px tile 中重复两次且业务极性相反；`V52Codec` 的有限 Chase 只在低可靠位上尝试最多 12 位、2 次翻转，并收集全部 CRC-valid 候选后去重，不能遇到首个 CRC 通过就返回。CRC 仅是完整性检查，不是验签。
-- **v5.2 的证据门槛与 v4 同一把尺（每 bit 观测 ≥ 5 次），且没有「带校验值就放行」的例外**：CRC24 只是完整性自检，不是验签。`V52Codec.Decoded.hasSufficientEvidence` 低于门槛时，CLI 必须输出 `TOO_SMALL(...)` 并把 `minObs` / `avgObs` / `|z|中位` 打进第一行；带 `--layout` 一律 exit 1 拒答，不带 `--layout` 只警告不解读字段。输出里不得出现 `mac=`（v5.2 没有 HMAC），CRC 档写作 `crcStatus=OK(完整性自检,未验签)`。
-- v5.2 的 `V52SyncMode.pn/separated` 是 pilot 实验档，默认 `.none`，且**只作用于 chroma**（luma 平面把亮度通道全给数据，此时不写导频、`pilotScore` 无意义，CLI 要打警告）；实验档的公共亮度调制会记录亮度残差，不得宣称不可见或已通过人工验收。缩放搜索为 0.50...1.50 连续粗网格加图像跨度相关的局部精搜，0.837/1.173 等比例必须作为未列入粗网格的测试。裁剪搜索不接受负 `--offset`（两端一致返回 nil），相位由解码器自己搜索。
-- chroma delta 必须按预乘 alpha 的整层 RGBA 合成验证，不能把 `delta` 当作简单的 chroma 加法；pilot 与 data 联合生成时 alpha 保持恒定。
-- **可见性只有亮度轴被陪色匹配掉，色度轴极差 = `delta`**：实测 delta=8 时 ΔB=−8/255、ΔLuma=0.35/255，2.67pt 棋盘格在纯色页上看得见。v5.2 观测余量是 v4 的两倍，默认 `delta` 取 4（模拟器六版式 `correctedBits=0`）；v4 保持历史默认 8，要更淡用 6。改默认 delta 必须重新实测并同步 README 中英 / 接入 skill，并重跑真机 + 最暗页面可见性验收，不许只改代码。
-- **改公共 API 语义必须带测试**，且 `swift test` 全绿才算完成。
-- **黑边裁剪是 CLI 契约，两端必须同义**：`Sources/BlindWatermarkCore/BorderTrim.swift` 的
-  `trimmingUniformDarkBorder` 与 `tools/bwdecode.py` 的 `trim_uniform_dark_border` 共享同一组
-  `BorderTrimHeuristic` 阈值（近黑 32 / 覆盖率 0.90 / 单边上限 25% / 内侧探针 ≥96 且占比 0.30）。
-  自动路径先裁再解，输出行加 `trim=(左,上,右,下)`，`phase` 随之相对裁剪后的图；显式 `--offset`
-  时不裁。改阈值必须同时改两端 + 补"深色页留白不裁"的测试。
-- **比例尺粗定位是 v5.2 搜索的第一层，两端同义**：`ScaleRuler.swift` 与 `tools/bwdecode.py` 的
-  `estimate_scale_ruler` 用同一套阈值（置信 ≥0.05、候选 ±10% / 5 档、block 搜索 3.5~13px）。
-  粗筛必须按**比例**排名（每个 (plane, sync, scale) 只留最高分的相位），否则同一比例的上百个相位会
-  挤满 top-N，非粗网格比例（0.837 / 1.173）进不了精搜 —— 这条有回归测试钉住，不许改回去。
-  比例尺只是粗定位：快路径失败必须退回完整 21 档网格。
-- **改解码逻辑要同步两处**：v4 的 `Sources/BlindWatermarkCore/BlockCodec.swift` 与 `tools/bwdecode.py`
-  是同一套算法的两份实现（常量、特征平面、折叠、判读阈值、载荷布局、页面短码、校验阶梯）。
-  v5.2 的 `V52Codec.swift` 与其 Python 镜像也必须同步；改完必须 `swift test` 与 `python3 tools/test_bwdecode.py` 都绿 —— 后者会在同一张 PNG 上与 Swift 对账。
-- **非平凡逻辑留一个可运行校验**（单元测试或 assert 自检），不靠"我推理过"。
-- **性能结论要实测。** 不接受"预期 4–8x"这类没测过的数字；写实测值并注明测量条件（设备/模拟器、模式、样本）。
-- **不要静默降级**：解码置信度不足时按 `弱 bit` 规则如实报 `WEAK` / `NO`，不硬凑一个结果。
-- **观测不足必须拒答**：没有校验值时，每 bit 观测 < `BlockCodec.minObservationsPerBit`（5 次）
-  一律输出 `TOO_SMALL(...)` 并拒绝 `--layout` 解读字段 —— 小图会解出"看着正常的垃圾"，
-  宁可报图太小。阈值来源见 `BlockCodec` 的实测注释，改动要带实测数据。
+- 不新增第三方运行时依赖。Swift 只用系统框架；Python工具沿用numpy/Pillow。
+- iOS13/macOS11，Demo iOS15。新增API必须满足可用性。
+- **3.0.0 仅支持 v6**，按用户要求删除旧兼容代码。历史截图需旧版本工具，不新增v4/v5.2回退。
+- v6 信息字段211bit/27字节：profile4(6)+uid32+timestamp31+buildTime24+page42+app14+note32+CRC24+reserved8(0)，末字节高5位全0。时间是UTC2026-01-01起的秒/分钟偏移。page8、note6用base37 `a-z0-9_`，首字符高位radix digit，右补`_`并去尾补位；app0…9999。非法profile/radix/reserved/padding/CRC必须拒绝。
+- BCH(511,211,t40)使用GF(512) primitive0x211、roots1…80，300位校验加211位信息，再追加一位整体偶校验得到512位。纠错诊断可含额外整体偶校验位，但不能称t41。
+- tile544×512px，cell32×8px，17列×64行；16列数据（两份512位不同交织副本），最后1列是64位独立色度同步。码字索引/极性/导频序列/常量必须两端一致。
+- 默认delta4、chroma。整层RGBA恒定预乘alpha；伴色只能减小亮度残差，色度仍可见。luma是实验档。不得未经目标真机人工验收称不可见。改默认值要实测并同步文档/skill。
+- CRC24只是完整性自检，不是验签，不是身份认证。输出为`crcStatus=OK(完整性自检,未验签)`，没有HMAC或`mac=`。
+- **每个码字bit物理观测≥5**才解读字段，不允许CRC例外。量化为0的非重叠cell计数但其信号贡献为0，不伪造方向/置信度。证据计数只包含完整落在内容矩形内的 cell：由 RGB 非均匀行列确定矩形，排除外侧完全均匀的 padding，不改变坐标或信号统计；内部 JPEG 零差分仍计数。该规则不保证识别纹理框或任意无水印区域。不足报TOO_SMALL及minObs/avgObs/|z|中位，带--layoutexit1、无字段；不带只诊断警告。
+- 没有BCH+CRC-valid载荷报NO，多个不同有效载荷报ambiguous并拒答。有限Chase在低可靠6位上翻1/2位，收集全部所搜索候选再去重。不能首个CRC通过立即返回。
+- 解码 API 与 CLI 的有效 scale 范围均为闭区间 0.5…1.5；非有限或越界参数提前拒绝。有限 Chase 的两个重试候选按各自实际 pilotScore 降序选取，同分保留原顺序。
+- 默认几何搜索先1.0、再0.50…1.50共21档与图像跨度决定的局部精搜。粗筛按比例留最佳相位，避免同一比例挤满候选；0.837/1.173是回归比例。性能必须实测，不给推测倍数。
+- 显式--offset只允许非负有限像素相位，关闭黑边裁剪；未指定先裁再搜，phase相对裁后图。Swift/Python黑边阈值同义：近黑32、覆盖0.90、单边上限25%、内侧亮探针≥96且占比0.30、深度8。深色页面不能为了出结果强制裁掉。
+- 修改公共API与非平凡逻辑带可运行验证；编解码修改同步`V6Codec.swift`、`V6BCH.swift`与`tools/bwdecode.py`。swift test及python3 tools/test_bwdecode.py全绿，并同图对账。
+- 验证包括原始设备像素截图、裁切/缩放/压缩/黑白边框的组合链路、小图拒答和无水印负样本。模拟器/Pillow结果不等于真机或实际IM转发验收。
+- 改布局破坏历史截图兼容，必须明说影响并同步README中英、解析和接入两个skill。
 
 ## 代码风格
 
