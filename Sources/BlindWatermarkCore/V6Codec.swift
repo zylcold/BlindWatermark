@@ -20,12 +20,16 @@ public enum V6Codec {
     static let shiftsPerContext = 2
     static let softBits = 6
     static let minimumPilotScore = 0.35
+    // 0.75 缩放加非整 cell 边框的回归需要跨周期的半像素相位。
+    static let companionXRefinements: [Double] = [-2, -1, 0, 1, 2]
+    static let companionYRefinements: [Double] = [-1, -0.5, 0, 0.5, 1]
     static let cells = columns * rows
 
     public struct Decoded {
         public let payload: WatermarkPayload?
         public let correctedBits: Int
         public let softRecoveryUsed: Bool
+        public let companionRecoveryUsed: Bool
         public let estimatedScale: Double
         public let offsetX: Double
         public let offsetY: Double
@@ -113,6 +117,7 @@ public enum V6Codec {
         let x: Double
         let y: Double
         let shifts: [(x: Int, y: Int, score: Double)]
+        var companion = false
         var score: Double { shifts.first?.score ?? 0 }
     }
 
@@ -133,8 +138,10 @@ public enum V6Codec {
         let width: Int
         let height: Int
         let values: [Double]
+        let companion: Bool
         let evidenceBounds: (left: Int, top: Int, right: Int, bottom: Int)
-        init(_ image: RGBAImage, plane: WatermarkPlane) {
+        init(_ image: RGBAImage, plane: WatermarkPlane, companion: Bool = false) {
+            self.companion = companion
             let width = image.width, height = image.height
             self.width = width
             self.height = height
@@ -150,7 +157,11 @@ public enum V6Codec {
             }
             evidenceBounds = (activeColumns.first ?? width, activeRows.first ?? height,
                               (activeColumns.last.map { $0 + 1 }) ?? 0, (activeRows.last.map { $0 + 1 }) ?? 0)
-            let feature = image.featureBuffer(plane)
+            // chroma 的 R/G 伴色与主载波反极性；JPEG 丢失色度后仍可能保留。
+            // 只改变读取特征，不能拿亮度实验渲染套用这个极性。
+            let feature = companion ? (0..<(width * height)).map {
+                -(Double(image.pixels[$0 * 4]) + Double(image.pixels[$0 * 4 + 1])) / 2
+            } : image.featureBuffer(plane)
             var sums = [Double](repeating: 0, count: (width + 1) * (height + 1))
             for y in 0..<height {
                 var sum = 0.0
@@ -185,6 +196,11 @@ public enum V6Codec {
         for row in 0..<ny {
             for col in 0..<nx {
                 let px = x + Double(col) * w, py = y + Double(row) * h
+                let bounds = integral.evidenceBounds
+                let inside = px >= Double(bounds.left) && py >= Double(bounds.top)
+                    && px + w <= Double(bounds.right) && py + h <= Double(bounds.bottom)
+                // 伴色包含亮度：排除框的亮度台阶，避免污染判位和导频排名。
+                if integral.companion && !inside { continue }
                 let difference = integral.mean(px, py, w / 2, h) - integral.mean(px + w / 2, py, w / 2, h)
                 // clip 限制内容硬边缘支配力；内部量化擦除仍参与统计，保持零信号。
                 let d = max(-observationClip, min(observationClip, difference))
@@ -193,9 +209,7 @@ public enum V6Codec {
                 stats.squares[index] += d * d
                 stats.counts[index] += 1
                 // 证据门槛独立于信号统计，外框不能替小裁片补足观测。
-                let bounds = integral.evidenceBounds
-                if px >= Double(bounds.left), py >= Double(bounds.top),
-                   px + w <= Double(bounds.right), py + h <= Double(bounds.bottom) {
+                if inside {
                     stats.evidenceCounts[index] += 1
                 }
             }
@@ -228,7 +242,7 @@ public enum V6Codec {
                                 searchTile: Bool) -> Context? {
         guard let stats = accumulate(integral, scale: scale, x: x, y: y) else { return nil }
         return Context(stats: stats, scale: scale, x: x, y: y,
-                       shifts: pilotShifts(stats, searchTile: searchTile))
+                       shifts: pilotShifts(stats, searchTile: searchTile), companion: integral.companion)
     }
 
     public static func decode(_ image: RGBAImage, plane: WatermarkPlane = .chroma, scale: Double = 1,
@@ -237,16 +251,27 @@ public enum V6Codec {
               image.pixels.count == image.width * image.height * 4 else { return nil }
         guard scale.isFinite, supportedScaleRange.contains(scale),
               offsetX.isFinite, offsetY.isFinite, offsetX >= 0, offsetY >= 0 else { return nil }
-        let integral = Integral(image, plane: plane)
-        guard let ctx = context(integral, scale: scale, x: offsetX, y: offsetY, searchTile: searchTile) else { return nil }
-        return adjudicate(candidates([ctx]))
+        for companion in plane == .chroma ? [false, true] : [false] {
+            let integral = Integral(image, plane: plane, companion: companion)
+            guard let ctx = context(integral, scale: scale, x: offsetX, y: offsetY, searchTile: searchTile) else { return nil }
+            // 包括 TOO_SMALL 和 ambiguous：已有结论时不换通道求放行。
+            if let result = adjudicate(candidates([ctx])) { return result }
+        }
+        return nil
     }
 
     public static func decodeBest(_ image: RGBAImage, scales: [Double]? = nil,
                                   plane: WatermarkPlane = .chroma) -> Decoded? {
         guard image.width > 0, image.height > 0,
               image.pixels.count == image.width * image.height * 4 else { return nil }
-        let integral = Integral(image, plane: plane)
+        for companion in plane == .chroma ? [false, true] : [false] {
+            let integral = Integral(image, plane: plane, companion: companion)
+            if let result = search(integral, scales: scales) { return result }
+        }
+        return nil
+    }
+
+    private static func search(_ integral: Integral, scales: [Double]?) -> Decoded? {
         func scan(_ values: [Double]) -> [Context] {
             var found = [Context]()
             for scale in values where scale.isFinite && supportedScaleRange.contains(scale) {
@@ -265,9 +290,17 @@ public enum V6Codec {
         func finish(_ contexts: [Context]) -> Decoded? {
             var refined = [Context]()
             for seed in contexts.prefix(maxContexts) {
-                for dy in [-1.0, 0, 1] {
-                    for dx in [-2.0, 0, 2] {
-                        let x = seed.x + dx, y = seed.y + dy
+                let xs = integral.companion ? companionXRefinements : [-2.0, 0, 2]
+                let ys = integral.companion ? companionYRefinements : [-1.0, 0, 1]
+                func phase(_ value: Double, period: Double) -> Double {
+                    guard integral.companion else { return value }
+                    let wrapped = value.truncatingRemainder(dividingBy: period)
+                    return wrapped < 0 ? wrapped + period : wrapped
+                }
+                for dy in ys {
+                    for dx in xs {
+                        let x = phase(seed.x + dx, period: Double(cellWidth) * seed.scale)
+                        let y = phase(seed.y + dy, period: Double(cellHeight) * seed.scale)
                         guard x >= 0, y >= 0,
                               let ctx = context(integral, scale: seed.scale, x: x, y: y, searchTile: true) else { continue }
                         refined.append(ctx)
@@ -278,9 +311,9 @@ public enum V6Codec {
         }
         if let scales { return finish(scan(scales)) }
         // 原始尺度是最常见通道；检查所搜索的全部相位候选后，再决定是否需要缩放搜索。
-        if let exact = finish(scan([1.0])), exact.isSuccess { return exact }
+        if let exact = finish(scan([1.0])) { return exact }
         let coarse = scan(defaultScales)
-        let step = 1 / Double(max(1, max(image.width, image.height)))
+        let step = 1 / Double(max(1, max(integral.width, integral.height)))
         var fine = Set<Double>()
         for seed in coarse.prefix(3) {
             for value in stride(from: max(0.5, seed.scale - 0.03), through: min(1.5, seed.scale + 0.03), by: step) {
@@ -362,7 +395,7 @@ public enum V6Codec {
         let distinct = Set(candidates.map { $0.payload.bytes })
         let ambiguous = distinct.count > 1
         return Decoded(payload: ambiguous ? nil : best.payload, correctedBits: best.correctedBits,
-                       softRecoveryUsed: best.soft, estimatedScale: best.context.scale,
+                       softRecoveryUsed: best.soft, companionRecoveryUsed: best.context.companion, estimatedScale: best.context.scale,
                        offsetX: best.context.x, offsetY: best.context.y,
                        tileShiftX: best.shiftX, tileShiftY: best.shiftY, pilotScore: best.pilot,
                        minObservations: best.minObs, averageObservations: best.avgObs,

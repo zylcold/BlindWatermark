@@ -47,6 +47,8 @@ tile为544×512px，cell32×8px，17列×64行。前16列共1024cell，分别放
 
 唯一有效载荷还需每码字bit物理观测≥5。小图不足时 `TOO_SMALL`，带layout无字段且exit1；无layout只诊断警告。未恢复报NO，多载荷报ambiguous。CRC状态固定为 `crcStatus=OK(完整性自检,未验签)`，没有mac输出。
 
+主色度特征失败后可读取既有伴色残差 `-(R+G)/2`。伴色的亮度边缘容易污染判位，故完整落在内容矩形之外的 cell 不参与信号和导频统计；该通道采用 x±2/±1/0、y±1/±0.5/0 的局部相位细搜，并按 cell 周期环绕。只在原通道没有有效载荷时启用；小图与多载荷结论不会触发回退。CLI 新增 `companionRecovery=true/false`，渲染协议及默认幅度不变，luma 渲染不使用该回退。2026-09-29 真实微信输入及更强压缩边界见 [恢复分析](wechat-recovery.md)。
+
 ## 2026-09-28 本机验收
 
 条件：arm64 macOS26.6.2，Swift6.4，release CLI；iPhone17 Pro Max模拟器、iOS26.4，原始像素1320×2868，delta4/chroma。XcodeBuildMCP编译/启动，sim-use保存原始PNG。Python3环境Pillow11.3.0/numpy2.0.2。Photo/Mixed内容是Demo程序噪声纹理与硬边缘，**不是自然照片或真机样本**。运行时随机纹理以本次保留截图为准，重跑sweep可能生成不同内容。
@@ -94,6 +96,8 @@ python3 tools/test_bwdecode.py
 [原始混排图](samples/v6-mixed-original.png)与[裁切/0.837缩放/两次Q76/黑框样本](samples/v6-mixed-crop-scale0837-q76-black.png)，以及[照片纹理裁切/两次Q76/白框样本](samples/v6-photo-crop-q76-white.png)保留了真实系统渲染链路。自动缩放搜索在回归脚本 `benchmark_channels.py --automatic` 中执行；固定样本CI使用已知比例以限制运行时间。
 
 `benchmark_channels.py --background <本地真实内容图片>` 可重新嵌入固定测试载荷再测传播链路，输出只能放私有临时目录；切勿把用户图片、生产uid或密钥提交到公开样本。
+
+另有 [合成色度衰减样本](samples/v6-companion-attenuated.png)：对白色背景的测试载荷将蓝黄差值保留40%，裁切后缩至904×1220，再两次JPEG Q92。它用于独立验证伴色回退，不代表实际微信编码器。
 
 ## 范围
 

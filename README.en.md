@@ -64,6 +64,8 @@ The decoder searches scale and phase automatically. Supply `--scale` when known;
 
 Successful decoding with `--layout` reports the full payload and fields with `crcStatus=OK(完整性自检,未验签)`. Every codeword bit requires at least five valid physical observations. Uniform outer padding adds no observations; internal JPEG erasures still count. Observation count is not confidence.
 
+If the primary chroma channel yields no valid payload, the decoder tries the existing R/G companion residual and reports `companionRecovery=true` on recovery. This changes decoding only, without increasing rendering strength; small-image and ambiguous results remain refusals.
+
 | Result | Meaning | Exit code |
 |---|---|---:|
 | Success | One valid payload passes BCH, field validation, CRC, and the observation threshold | 0 |
@@ -83,5 +85,7 @@ python3 tools/test_bwdecode.py
 Regression tests cover cropping, resizing, repeated JPEG encoding, frames, and small-image refusal, including Swift/Python agreement on the same files. [Samples](docs/samples/samples.json) and [measurement records](docs/v6-protocol.md#2026-09-28-本机验收) provide reproducible data and commands.
 
 Tiny crops, severe blur, complete carrier quantization, photographs of a display, arbitrary rotation, and perspective distortion are outside recovery guarantees. Recorded success rates apply only to the listed samples and transformations. Actual messaging-app transfers, target devices, and visibility on dark/photo pages require separate acceptance checks.
+
+See [the recovery analysis](docs/wechat-recovery.md) for measured messaging-app compression results and further improvement directions.
 
 For agents: [decode skill](skills/blind-watermark/SKILL.md) · [integration skill](skills/blind-watermark-integration/SKILL.md).

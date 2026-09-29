@@ -34,3 +34,7 @@ python3 /path/to/BlindWatermark/tools/bwdecode.py shot.jpg --layout
 失败排查顺序：确认 v6 来源和 plane；保留原始文件及像素尺寸；先解原图，再分别与组合测裁切、压缩、缩放、边框；已知比例可显式指定。报告实际命令、退出码、观测和纠错数。未解出就说明失败，不推测 uid；已通过 CRC 也不能说“确定某人发的”。小图优先要求更大范围原图，而不是降低门槛。
 
 协议、测量与范围见 [协议记录](../../docs/v6-protocol.md) 与 [README](../../README.md)。安装水印见 [接入 skill](../blind-watermark-integration/SKILL.md)，本 skill 不负责修改 App 接入。
+
+主色度通道无有效载荷时，解码器会尝试已有 R/G 伴色残差，成功时报告 `companionRecovery=true`。这只改变解码，不提高渲染强度；小图和多载荷拒答仍保留。伴色特征为 `-(R+G)/2`，仅适用于 chroma 渲染；排除内容矩形外的 cell 参与伴色判位和导频统计。备用通道局部细搜为 x±2/±1/0、y±1/±0.5/0，并按 cell 周期环绕相位。观测门槛仍是同一组物理 cell，不累加两个通道的观测。
+
+真实转发前后对比：`python3 tools/benchmark_pair.py --original 原文件.jpg --compressed 转发后.jpg --output /private/tmp/pair.json`。只保存尺寸、JPEG参数和恢复统计；用户图片及其载荷不纳入公开样本。实测范围见 [微信恢复分析](../../docs/wechat-recovery.md)。

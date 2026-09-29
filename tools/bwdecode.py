@@ -34,12 +34,18 @@ OBSERVATION_CLIP = 12.0
 OBSERVATION_VARIANCE_FLOOR = 0.25
 MAX_CONTEXTS, SHIFTS_PER_CONTEXT, SOFT_BITS = 12, 2, 6
 MIN_PILOT_SCORE = 0.35
+# 0.75 缩放加非整 cell 边框时需要覆盖跨周期的半像素相位。
+COMPANION_X_REFINEMENTS = (-2,-1,0,1,2)
+COMPANION_Y_REFINEMENTS = (-1,-0.5,0,0.5,1)
 DEFAULT_SCALES = [0.5 + i * 0.05 for i in range(21)]
 
-def feature_plane(rgba: np.ndarray, plane: str) -> np.ndarray:
+def feature_plane(rgba: np.ndarray, plane: str, companion: bool = False) -> np.ndarray:
     """逐像素标量特征，量纲与像素值一致（对应 `RGBAImage.featureBuffer`）。"""
     px = rgba.astype(np.float64)
     r, g, b = px[:, :, 0], px[:, :, 1], px[:, :, 2]
+    # 只读取 chroma 渲染已有的反极性 R/G 伴色，不增加渲染幅度。
+    if companion and plane == "chroma":
+        return -(r + g) / 2
     if plane == "luma":
         return 0.299 * r + 0.587 * g + 0.114 * b
     # chroma：蓝-黄对色平面。灰阶内容在这里恒为 0，所以内容噪声几乎消失
@@ -644,7 +650,7 @@ def evidence_bounds(image):
     return (int(cols[0]),int(rows[0]),int(cols[-1])+1,int(rows[-1])+1) if len(rows) and len(cols) else (0,0,0,0)
 
 
-def _accumulate(sat,scale,x,y,bounds):
+def _accumulate(sat,scale,x,y,bounds,companion=False):
     h,w=sat.shape[0]-1,sat.shape[1]-1
     if not all(math.isfinite(v) for v in (scale,x,y)) or not 0.5<=scale<=1.5 or x<0 or y<0:
         return None
@@ -663,6 +669,10 @@ def _accumulate(sat,scale,x,y,bounds):
     left,top,right,bottom=bounds
     valid=(xs>=left)&(ys>=top)&(xs+cw<=right)&(ys+ch<=bottom)
     evidence=np.bincount(ids[valid.ravel()],minlength=COLUMNS*ROWS)
+    # 伴色包含亮度，纯色框的亮度台阶不能参与判位或导频排名。
+    if companion:
+        ids=ids[valid.ravel()]
+        values=values[valid.ravel()]
     return (np.bincount(ids,weights=values,minlength=COLUMNS*ROWS),np.bincount(ids,weights=values*values,minlength=COLUMNS*ROWS),np.bincount(ids,minlength=COLUMNS*ROWS),evidence)
 
 
@@ -673,12 +683,13 @@ class Context:
     x: float
     y: float
     shifts: list
+    companion: bool = False
     @property
     def score(self):return self.shifts[0][2] if self.shifts else 0
 
 
-def _context(sat,scale,x,y,bounds,search_tile=True):
-    stats=_accumulate(sat,scale,x,y,bounds)
+def _context(sat,scale,x,y,bounds,search_tile=True,companion=False):
+    stats=_accumulate(sat,scale,x,y,bounds,companion)
     if stats is None:return None
     sums,squares,counts,_=stats
     means=np.divide(sums,counts,out=np.zeros(COLUMNS*ROWS),where=counts>0)
@@ -688,7 +699,7 @@ def _context(sat,scale,x,y,bounds,search_tile=True):
     scores=np.divide((values*PILOT_SIGNS).sum(axis=1),np.sqrt(energy),out=np.zeros(len(values)),where=energy>0)
     ranked=np.argsort(-scores,kind='stable')[:SHIFTS_PER_CONTEXT]
     shifts=[(int(i%COLUMNS),int(i//COLUMNS),float(scores[i])) for i in ranked]
-    return Context(stats,scale,x,y,shifts)
+    return Context(stats,scale,x,y,shifts,companion)
 
 
 @dataclass
@@ -769,14 +780,26 @@ def _candidates(contexts):
 
 def decode(image,plane='chroma',scale=1,offset_x=0,offset_y=0,search_tile=False):
     if not all(math.isfinite(v) for v in (scale,offset_x,offset_y)) or not 0.5<=scale<=1.5 or offset_x<0 or offset_y<0:return None
-    sat=integral_image(feature_plane(image,plane))
-    ctx=_context(sat,scale,offset_x,offset_y,evidence_bounds(image),search_tile)
-    return adjudicate(_candidates([ctx])) if ctx else None
+    bounds=evidence_bounds(image)
+    for companion in ([False,True] if plane=='chroma' else [False]):
+        sat=integral_image(feature_plane(image,plane,companion))
+        ctx=_context(sat,scale,offset_x,offset_y,bounds,search_tile,companion)
+        result=adjudicate(_candidates([ctx])) if ctx else None
+        # 保留主通道的小图/歧义结论，不使用备用通道绕过拒答。
+        if result is not None:return result
+    return None
 
 
 def decode_best(image,scales=None,plane='chroma'):
     bounds=evidence_bounds(image)
-    sat=integral_image(feature_plane(image,plane))
+    for companion in ([False,True] if plane=='chroma' else [False]):
+        sat=integral_image(feature_plane(image,plane,companion))
+        result=_search(sat,bounds,scales,companion)
+        if result is not None:return result
+    return None
+
+
+def _search(sat,bounds,scales,companion):
     def scan(values):
         found=[]
         for scale in values:
@@ -784,24 +807,28 @@ def decode_best(image,scales=None,plane='chroma'):
             best=None
             for y in np.arange(0,CELL_HEIGHT*scale,2):
                 for x in np.arange(0,CELL_WIDTH*scale,4):
-                    ctx=_context(sat,float(scale),float(x),float(y),bounds)
+                    ctx=_context(sat,float(scale),float(x),float(y),bounds,companion=companion)
                     if ctx and (best is None or ctx.score>best.score):best=ctx
             if best:found.append(best)
         return sorted(found,key=lambda c:-c.score)
     def finish(contexts):
         refined=[]
         for seed in contexts[:MAX_CONTEXTS]:
-            for dy in (-1,0,1):
-                for dx in (-2,0,2):
-                    if seed.x+dx<0 or seed.y+dy<0:continue
-                    ctx=_context(sat,seed.scale,seed.x+dx,seed.y+dy,bounds)
+            for dy in (COMPANION_Y_REFINEMENTS if companion else (-1,0,1)):
+                for dx in (COMPANION_X_REFINEMENTS if companion else (-2,0,2)):
+                    x,y=seed.x+dx,seed.y+dy
+                    if companion:
+                        x=x%(CELL_WIDTH*seed.scale)
+                        y=y%(CELL_HEIGHT*seed.scale)
+                    if x<0 or y<0:continue
+                    ctx=_context(sat,seed.scale,x,y,bounds,companion=companion)
                     if ctx:refined.append(ctx)
         return adjudicate(_candidates(sorted(refined,key=lambda c:-c.score)[:MAX_CONTEXTS]))
     if scales is not None:return finish(scan(scales))
     exact=finish(scan([1.0]))
-    if exact and exact.is_success:return exact
+    if exact is not None:return exact
     coarse=scan(DEFAULT_SCALES)
-    step=1/max(image.shape[:2])
+    step=1/(max(sat.shape)-1)
     fine=set()
     for seed in coarse[:3]:
         for value in np.arange(max(0.5,seed.scale-0.03),min(1.5,seed.scale+0.03)+1e-10,step):
@@ -844,7 +871,7 @@ def main(argv=None):
     p=result.payload
     verdict='OK' if result.has_sufficient_evidence else f'TOO_SMALL(每 bit 最少 {c.min_obs} 次，需要 ≥ 5)'
     trim_field=f' trim=({",".join(map(str,trim))})' if any(trim) else ''
-    print(f'protocol=v6 payload=0x{p.bytes.hex()} plane={args.plane} phase=({c.context.x:.2f},{c.context.y:.2f}) tileShift=({c.shift_x},{c.shift_y}) scale={c.context.scale:.6f} correctedBits={c.corrected_bits} softRecovery={str(c.soft).lower()} pilotScore={c.pilot:.3f} minObs={c.min_obs} avgObs={c.avg_obs:.1f} |z|中位={c.median_z:.1f} {verdict}{trim_field}')
+    print(f'protocol=v6 payload=0x{p.bytes.hex()} plane={args.plane} phase=({c.context.x:.2f},{c.context.y:.2f}) tileShift=({c.shift_x},{c.shift_y}) scale={c.context.scale:.6f} correctedBits={c.corrected_bits} softRecovery={str(c.soft).lower()} companionRecovery={str(c.context.companion).lower()} pilotScore={c.pilot:.3f} minObs={c.min_obs} avgObs={c.avg_obs:.1f} |z|中位={c.median_z:.1f} {verdict}{trim_field}')
     if not result.has_sufficient_evidence:
         print('观测不足，不解读字段，请使用范围更大的原图。',file=sys.stderr)
         return 1 if args.layout else 0

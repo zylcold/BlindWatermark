@@ -42,5 +42,12 @@
     "page": "photogri",
     "app": 1,
     "note": ""
+  },
+  {
+    "file": "v6-companion-attenuated.png",
+    "scale": 0.75,
+    "payloadHex": "f6eedbeabd745a16d0882e50bbbc36826c0140066fc77c18a80700",
+    "companionRecovery": true,
+    "kind": "synthetic: chroma attenuation 0.4, crop y82/h1626, resize 904x1220, JPEG Q92 twice"
   }
 ]

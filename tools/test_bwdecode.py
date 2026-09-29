@@ -152,6 +152,44 @@ class V6Checks(unittest.TestCase):
                 self.assertIn('TOO_SMALL',output.stdout)
                 self.assertNotIn('uid=',output.stdout)
 
+    def test_companion_recovery_and_evidence_gate(self):
+        source=screenshot()
+        self.assertFalse(b.decode(source).best.context.companion)
+        source[:,:,2]=source[:,:,0]
+        recovered=b.decode(source)
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.payload,PAYLOAD)
+        self.assertTrue(recovered.best.context.companion)
+        self.assertTrue(recovered.has_sufficient_evidence)
+        small=source[:b.TILE_HEIGHT,:b.TILE_WIDTH]
+        refused=b.decode_best(small,[1])
+        self.assertIsNotNone(refused)
+        self.assertTrue(refused.best.context.companion)
+        self.assertFalse(refused.has_sufficient_evidence)
+        self.assertIsNone(b.decode(small,plane='luma'))
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'small-companion.png';Image.fromarray(small).save(path)
+            swift=Path(os.environ.get('BW_SWIFT_CLI',str(ROOT/'.build/release/bwdecode')))
+            for command in [[str(swift)],[os.sys.executable,str(ROOT/'tools/bwdecode.py')]]:
+                output=subprocess.run(command+[str(path),'--scale','1','--layout'],text=True,capture_output=True,timeout=60)
+                self.assertEqual(output.returncode,1,output.stdout)
+                self.assertIn('companionRecovery=true',output.stdout)
+                self.assertIn('TOO_SMALL',output.stdout)
+                self.assertNotIn('uid=',output.stdout)
+            fixture=b.load_image(str(ROOT/'docs/samples/v6-companion-attenuated.png'))
+            for color in [0,40,255]:
+                framed=np.pad(fixture,((31,23),(17,19),(0,0)),constant_values=color)
+                framed[:,:,3]=255
+                result=b.decode_best(framed,[.75])
+                self.assertIsNotNone(result)
+                self.assertEqual(result.payload,PAYLOAD)
+                self.assertTrue(result.best.context.companion)
+                path=Path(folder)/'companion-frame.png';Image.fromarray(framed).save(path)
+                output=subprocess.run([str(swift),str(path),'--scale','.75','--layout'],text=True,capture_output=True,timeout=60)
+                self.assertEqual(output.returncode,0,output.stderr)
+                self.assertIn('payload=0x'+PAYLOAD.bytes.hex(),output.stdout)
+                self.assertIn('companionRecovery=true',output.stdout)
+
     def test_ambiguity(self):
         ctx=b.Context((np.zeros(b.COLUMNS*b.ROWS),)*4,1,0,0,[])
         other=b.WatermarkPayload(1,0,0,'other')
@@ -177,6 +215,9 @@ class V6Checks(unittest.TestCase):
                                   text=True,capture_output=True,timeout=60)
             self.assertEqual(output.returncode,0,output.stderr)
             self.assertIn('payload=0x'+sample['payloadHex'],output.stdout)
+            if sample.get('companionRecovery'):
+                self.assertTrue(result.best.context.companion)
+                self.assertIn('companionRecovery=true',output.stdout)
         output=subprocess.run([os.sys.executable,str(ROOT/'tools/bwdecode.py'),'/missing-v6-file.jpg','--layout'],
                               text=True,capture_output=True)
         self.assertEqual(output.returncode,1)

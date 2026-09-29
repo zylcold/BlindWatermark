@@ -64,6 +64,8 @@ swift build -c release
 
 带 `--layout` 成功时输出完整载荷及字段，校验状态为 `crcStatus=OK(完整性自检,未验签)`。每个码字 bit 至少需要 5 次有效物理观测；外侧完全均匀的空白框不增加观测，内部 JPEG 零差分仍保留。观测数不等于置信度。
 
+主色度通道无有效载荷时，解码器会尝试已有 R/G 伴色残差，成功时报告 `companionRecovery=true`。这只改变解码，不提高渲染强度；小图和多载荷拒答仍保留。
+
 | 结果 | 含义 | 退出码 |
 |---|---|---:|
 | 成功 | 唯一有效载荷，BCH、字段、CRC 与观测门槛均通过 | 0 |
@@ -83,5 +85,7 @@ python3 tools/test_bwdecode.py
 回归覆盖裁切、缩放、重复 JPEG、边框、小图拒答，并进行 Swift/Python 同图对账。[样本](docs/samples/samples.json)与[验收记录](docs/v6-protocol.md#2026-09-28-本机验收)包含可复核数据和复测命令。
 
 极小裁片、强模糊、载波被彻底量化抹除，以及拍屏、任意旋转或透视变形不在恢复保证内。记录中的成功率仅适用于对应样本和变换；实际 IM 转发、目标真机与深色/照片页面观感需单独验收。
+
+微信压缩的实测结果与进一步改进方向见 [恢复分析](docs/wechat-recovery.md)。
 
 Agent 使用：[截图解析 skill](skills/blind-watermark/SKILL.md) · [接入 skill](skills/blind-watermark-integration/SKILL.md)。

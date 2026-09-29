@@ -66,10 +66,11 @@ if let offset {
 guard let result = decoded else { fail("NO(protocol=v6，无 BCH + CRC-valid 载荷)", code: 1) }
 guard !result.ambiguous, let payload = result.payload else { fail("ambiguous(protocol=v6，多个不同载荷，拒绝解读)", code: 1) }
 let verdict = result.hasSufficientEvidence ? "OK" : "TOO_SMALL(每 bit 最少 \(result.minObservations) 次，需要 ≥ 5)"
-print(String(format: "protocol=v6 payload=0x%@ plane=%@ phase=(%.2f,%.2f) tileShift=(%d,%d) scale=%.6f correctedBits=%d softRecovery=%@ pilotScore=%.3f minObs=%d avgObs=%.1f |z|中位=%.1f %@%@",
+print(String(format: "protocol=v6 payload=0x%@ plane=%@ phase=(%.2f,%.2f) tileShift=(%d,%d) scale=%.6f correctedBits=%d softRecovery=%@ companionRecovery=%@ pilotScore=%.3f minObs=%d avgObs=%.1f |z|中位=%.1f %@%@",
              payload.bytes.map { String(format: "%02x", $0) }.joined(), plane.rawValue,
              result.offsetX, result.offsetY, result.tileShiftX, result.tileShiftY, result.estimatedScale,
-             result.correctedBits, result.softRecoveryUsed ? "true" : "false", result.pilotScore,
+             result.correctedBits, result.softRecoveryUsed ? "true" : "false",
+             result.companionRecoveryUsed ? "true" : "false", result.pilotScore,
              result.minObservations, result.averageObservations, result.medianAbsZ, verdict,
              trim.outputField.map { " " + $0 } ?? ""))
 if !result.hasSufficientEvidence {

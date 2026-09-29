@@ -175,6 +175,52 @@ final class V6Tests: XCTestCase {
         XCTAssertTrue(result.hasSufficientEvidence)
     }
 
+    func testCompanionRecoveryAndEvidenceGate() throws {
+        // 消去主色度，只保留渲染器已有 R/G 残差，模拟通道擦除而不是加大水印。
+        func eraseChroma(_ input: RGBAImage) -> RGBAImage {
+            var image = input
+            for i in stride(from: 0, to: image.pixels.count, by: 4) {
+                image.pixels[i + 2] = image.pixels[i]
+            }
+            return image
+        }
+        let source = shot()
+        let primary = try XCTUnwrap(V6Codec.decode(source))
+        XCTAssertFalse(primary.companionRecoveryUsed)
+        let recovered = try XCTUnwrap(V6Codec.decode(eraseChroma(source)))
+        XCTAssertEqual(recovered.payload, payload)
+        XCTAssertTrue(recovered.companionRecoveryUsed)
+        XCTAssertTrue(recovered.hasSufficientEvidence)
+        let small = eraseChroma(shot(width: V6Codec.tileWidth, height: V6Codec.tileHeight))
+        let refused = try XCTUnwrap(V6Codec.decodeBest(small, scales: [1]))
+        XCTAssertTrue(refused.companionRecoveryUsed)
+        XCTAssertFalse(refused.hasSufficientEvidence)
+        // luma 渲染不适用反极性的伴色回退。
+        XCTAssertNil(V6Codec.decode(small, plane: .luma))
+
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("docs/samples/v6-companion-attenuated.png")
+        let reader = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let image = try XCTUnwrap(RGBAImage(cgImage: try XCTUnwrap(CGImageSourceCreateImageAtIndex(reader, 0, nil))))
+        let resized = try XCTUnwrap(V6Codec.decodeBest(image, scales: [0.75]))
+        XCTAssertEqual(resized.payload, payload)
+        XCTAssertTrue(resized.companionRecoveryUsed)
+        XCTAssertTrue(resized.hasSufficientEvidence)
+        var framed = RGBAImage(width: image.width + 36, height: image.height + 54)
+        framed.fill((255, 255, 255, 255))
+        for row in 0..<image.height {
+            let start = ((row + 31) * framed.width + 17) * 4
+            let source = row * image.width * 4
+            framed.pixels.replaceSubrange(start..<(start + image.width * 4),
+                with: image.pixels[source..<(source + image.width * 4)])
+        }
+        let framedResult = try XCTUnwrap(V6Codec.decodeBest(framed, scales: [0.75]))
+        XCTAssertEqual(framedResult.payload, payload)
+        XCTAssertTrue(framedResult.companionRecoveryUsed)
+        XCTAssertTrue(framedResult.hasSufficientEvidence)
+    }
+
     func testAmbiguousCandidatesAreRejected() throws {
         let ctx = V6Codec.Context(stats: .init(), scale: 1, x: 0, y: 0, shifts: [])
         let other = WatermarkPayload(uid: 1, timestampOffset: 0, buildMinuteOffset: 0, pageCode: "other")!

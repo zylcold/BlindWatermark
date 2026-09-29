@@ -43,3 +43,7 @@ sweep使用XcodeBuildMCP和sim-use原始像素截图，需要预先安装和授�
 最少5次不重叠物理cell观测与BCH/CRC/合法字段必须同时满足。量化为0的cell仍计数但信号为0。证据计数只包含完整落在内容矩形内的 cell：由 RGB 非均匀行列确定矩形，排除外侧完全均匀的 padding，不改变坐标或信号统计；内部 JPEG 零差分仍计数。该规则不保证识别纹理框或任意无水印区域。不得用CRC通过绕过TOO_SMALL，不得多候选首个即返回。解码报 `crcStatus=OK(完整性自检,未验签)`，不报mac。
 
 编解码逻辑变更同步Swift/Python，布局/参数变更同步README中英和两个skill，并更新黄金向量及可复现测试。实际数字和边界见 [协议记录](../../docs/v6-protocol.md)。截图解析流程见 [解析 skill](../blind-watermark/SKILL.md)，此处只负责接入与验收。
+
+主色度通道无有效载荷时，解码器会尝试已有 R/G 伴色残差，成功时报告 `companionRecovery=true`。这只改变解码，不提高渲染强度；小图和多载荷拒答仍保留。伴色特征为 `-(R+G)/2`，仅适用于 chroma 渲染；排除内容矩形外的 cell 参与伴色判位和导频统计。备用通道局部细搜为 x±2/±1/0、y±1/±0.5/0，并按 cell 周期环绕相位。观测门槛仍是同一组物理 cell，不累加两个通道的观测。
+
+真实转发前后对比：`python3 tools/benchmark_pair.py --original 原文件.jpg --compressed 转发后.jpg --output /private/tmp/pair.json`。只保存尺寸、JPEG参数和恢复统计；用户图片及其载荷不纳入公开样本。实测范围见 [微信恢复分析](../../docs/wechat-recovery.md)。
