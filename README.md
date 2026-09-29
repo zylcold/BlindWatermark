@@ -1,10 +1,10 @@
 # BlindWatermark
 
-代码版本：**3.0.0** · 协议：**v6** · [English](README.en.md)
+代码版本：**3.1.0** · 协议：**v6 + 条码层** · [English](README.en.md)
 
 在 iOS 界面上叠加低幅度色度水印，从截图中离线恢复 uid、时间、构建时间、页面短码、app 和 note，无需服务端回查。Swift 运行时只使用系统框架，支持 iOS 13 / macOS 11；Demo 最低 iOS 15。
 
-当前只支持 v6，历史截图需使用对应历史版本工具。默认 `delta=4`、`plane=chroma`。CRC24 用于完整性自检，不代表验签或身份认证；水印观感需在目标设备上验收。
+当前只支持 v6，历史截图需使用对应历史版本工具。默认 `delta=4`、`plane=chroma`。3.1.0 起默认同时开启「抗微信压缩」条码层：顶部/底部各一条 1pt 可见亮度条（uid + 分钟），抗缩放与强压缩、裁切即失效，与 v6 互补，见 [条码水印](docs/strip-watermark.md)。CRC24/CRC16 用于完整性自检，不代表验签或身份认证；水印观感需在目标设备上验收。
 
 ## 安装
 
@@ -35,7 +35,8 @@ guard let payload = WatermarkPayload(
     note: "ticket"
 ) else { fatalError("载荷超出 v6 范围") }
 
-Watermark.install(payload: payload) // delta=4, plane=.chroma
+Watermark.install(payload: payload) // delta=4, plane=.chroma, strip=.topAndBottom（默认）
+// 只要 v6 层（关闭条码）：Watermark.install(payload: payload, strip: .off)
 // 换页或刷新时间时构造新载荷，再调用 Watermark.update(payload: newPayload)。
 ```
 
@@ -58,7 +59,12 @@ ObjC `+load` 会自动挂载。未配置时 uid 为 IDFV 的 FNV-1a 哈希，时
 swift build -c release
 .build/release/bwdecode shot.jpg --layout
 .build/release/bwdecode shot.jpg --layout --scale 0.837
+.build/release/bwdecode shot.jpg --strip-only      # 只解顶部/底部条码，秒级（跳过 v6 几何搜索）
+.build/release/bwdecode shot.jpg --json            # 机读 JSON（v6 + strip）
+.build/release/bwdecode expect --uid 124914474 --timestamp 1790589485 --build 202609291449   # 写入端期望值→原始 JSON
 ```
+
+条码层（「抗微信压缩」档）输出 `strip=OK edge=… uid=… time=… fixedBits=…`；双条不一致或仅单边纠错解时拒答（宁缺毋假），布局与仲裁见 [条码水印](docs/strip-watermark.md)。`expect` 子命令回显写入原始值（`--build` 原样返回，不转时区），供编码端与解码结果对账。
 
 默认自动搜索比例和相位；已知比例可传 `--scale`，有效范围为 0.5…1.5。`--plane` 必须与生成端一致，默认 chroma；luma 为实验档。`--offset X,Y` 指定非负像素相位并关闭自动黑边裁剪；未指定时，输出的 phase 相对于裁剪后的图像。
 

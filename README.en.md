@@ -35,7 +35,8 @@ guard let payload = WatermarkPayload(
     note: "ticket"
 ) else { fatalError("Payload exceeds v6 limits") }
 
-Watermark.install(payload: payload) // delta=4, plane=.chroma
+Watermark.install(payload: payload) // delta=4, plane=.chroma, strip=.topAndBottom (default)
+// v6 layer only (disable strips): Watermark.install(payload: payload, strip: .off)
 // On a page or timestamp change, construct a new payload and call Watermark.update(payload: newPayload).
 ```
 
@@ -58,7 +59,12 @@ ObjC `+load` mounts the watermark automatically. Without configuration, uid is a
 swift build -c release
 .build/release/bwdecode shot.jpg --layout
 .build/release/bwdecode shot.jpg --layout --scale 0.837
+.build/release/bwdecode shot.jpg --strip-only      # strip layer only, seconds (skips v6 geometry search)
+.build/release/bwdecode shot.jpg --json            # machine-readable JSON (v6 + strip)
+.build/release/bwdecode expect --uid 124914474 --timestamp 1790589485 --build 202609291449   # encoder-side expected values -> raw JSON
 ```
+
+The strip layer (anti-IM-compression) reports `strip=OK edge=… uid=… time=… fixedBits=…`; mismatched strips or a single-edge corrected decode are rejected (no false identities). Layout and arbitration: [strip watermark](docs/strip-watermark.md). The `expect` subcommand echoes raw encoder inputs (`--build` verbatim, no timezone conversion) for encode/decode reconciliation.
 
 The decoder searches scale and phase automatically. Supply `--scale` when known; the valid range is 0.5…1.5. `--plane` must match the renderer and defaults to chroma; luma is experimental. Nonnegative `--offset X,Y` fixes pixel phase and disables automatic dark-border trimming. Without it, the reported phase is relative to the trimmed image.
 

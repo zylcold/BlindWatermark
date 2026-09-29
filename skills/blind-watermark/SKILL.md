@@ -13,6 +13,10 @@ swift build -c release --package-path /path/to/BlindWatermark
 /path/to/BlindWatermark/.build/release/bwdecode shot.jpg --layout
 # 已知缩放比例时缩小搜索范围
 /path/to/BlindWatermark/.build/release/bwdecode shot.jpg --layout --scale 0.837
+# 条码层（抗微信压缩）：只解条码秒级返回，跳过 v6 几何搜索
+/path/to/BlindWatermark/.build/release/bwdecode shot.jpg --strip-only
+# 机读 JSON（v6 + strip）
+/path/to/BlindWatermark/.build/release/bwdecode shot.jpg --json
 # Python 镜像（numpy/Pillow）
 python3 /path/to/BlindWatermark/tools/bwdecode.py shot.jpg --layout
 ```
@@ -38,3 +42,9 @@ python3 /path/to/BlindWatermark/tools/bwdecode.py shot.jpg --layout
 主色度通道无有效载荷时，解码器会尝试已有 R/G 伴色残差，成功时报告 `companionRecovery=true`。这只改变解码，不提高渲染强度；小图和多载荷拒答仍保留。伴色特征为 `-(R+G)/2`，仅适用于 chroma 渲染；排除内容矩形外的 cell 参与伴色判位和导频统计。备用通道局部细搜为 x±2/±1/0、y±1/±0.5/0，并按 cell 周期环绕相位。观测门槛仍是同一组物理 cell，不累加两个通道的观测。
 
 真实转发前后对比：`python3 tools/benchmark_pair.py --original 原文件.jpg --compressed 转发后.jpg --output /private/tmp/pair.json`。只保存尺寸、JPEG参数和恢复统计；用户图片及其载荷不纳入公开样本。实测范围见 [微信恢复分析](../../docs/wechat-recovery.md)。
+
+## 条码层（抗微信压缩档）
+
+3.1.0 起默认与 v6 同时渲染：顶部/底部各一条 1pt 可见亮度条，76 bit = marker`1011`+uid32+分钟偏移24+CRC16-CCITT-FALSE。条码用未裁边原图解码（黑边裁剪可能把条裁掉）。输出 `strip=OK edge=… uid=… time=… fixedBits=…`。
+
+仲裁语义（两端一致，见 [条码协议](../../docs/strip-watermark.md)）：双条载荷一致才采信；仅单边只接受 fixedBits=0 且复核误差 ≤4 的精确解；弱块纠错只翻 CRC 段，不碰载荷区。`strip=NO` 不是错误，是拒答——不能为了出 uid 降低门槛；深色页面条码可见性属预期，不是解析问题。写入端对账：`bwdecode expect --uid … --timestamp … --build YYYYMMDDHHMM …` 回显原始 JSON（build 原样、不转时区），与 `--json` 解码结果比对。

@@ -15,7 +15,8 @@ guard let payload = WatermarkPayload(
     uid: uid, timestamp: timestamp, buildTime: buildTime,
     pageClassName: type(of: self).description(), app: 11, note: "ticket"
 ) else { fatalError("无效 v6 载荷") }
-Watermark.install(payload: payload) // delta=4 / .chroma
+Watermark.install(payload: payload) // delta=4 / .chroma / strip=.topAndBottom（默认）
+// 只要 v6 色度层（关闭条码）：Watermark.install(payload: payload, strip: .off)
 // 换页/更新时构造新值
 Watermark.update(payload: payload)
 ```
@@ -25,6 +26,8 @@ Watermark.update(payload: payload)
 BCH(511,211,t40)+偶校验形成512位码字，544×512px tile里两份不同交织副本，cell32×8px正弦载波，最后一列64cell是独立色度同步。默认delta4，整层预乘RGBA恒alpha，伴色减小亮度残差；不能把delta理解成简单色度加法，更不能称不可见。luma仅实验。调delta后需重新验收最暗页面、纯色和照片；未经真机人工验收不宣称观感通过。
 
 保留 ObjC +load 零接入：默认 uid=IDFV FNV-1a哈希、时间=刷新时间、buildTime=协议起点、page/note空、app0。正式业务显式提供全部字段，或者未install时用主线程 `Watermark.payloadProvider` 返回类型化值，每次刷新取新载荷。显式install后update负责更新；库不自动推断当前页面或真实构建时间。
+
+「抗微信压缩」条码层默认开启（`strip: .topAndBottom`）：顶部/底部各 1pt 可见亮度条（uid+分钟，76 bit，CRC16）。它抗缩放/强压缩、裁切即失效，与 v6 互补；关闭传 `.off`。条码**是可见的**，接入验收必须包含目标设备深色/浅色页面顶部与底部观感确认；解码端对账用 `bwdecode expect` 回显原始 JSON（`--build` 原样返回），并用 `--strip-only` 复测 IM 转发链路。契约见 [条码协议](../../docs/strip-watermark.md)。
 
 验收必须包括实际渲染和传播链路，不能仅看完整PNG：
 
