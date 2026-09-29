@@ -51,7 +51,7 @@ python3 tools/benchmark_channels.py --input-dir /private/tmp/bw-v6-demo-samples 
 - 默认几何搜索先1.0、再0.50…1.50共21档与图像跨度决定的局部精搜。粗筛按比例留最佳相位，避免同一比例挤满候选；0.837/1.173是回归比例。性能必须实测，不给推测倍数。
 - 显式--offset只允许非负有限像素相位，关闭黑边裁剪；未指定先裁再搜，phase相对裁后图。Swift/Python黑边阈值同义：近黑32、覆盖0.90、单边上限25%、内侧亮探针≥96且占比0.30、深度8。深色页面不能为了出结果强制裁掉。
 - 主色度通道无有效载荷时，解码器会尝试已有 R/G 伴色残差，成功时报告 `companionRecovery=true`。这只改变解码，不提高渲染强度；小图和多载荷拒答仍保留。伴色特征 `-(R+G)/2` 只作用于 chroma 渲染；同一物理 cell 不因多通道重复计数。伴色排除内容矩形外 cell，局部细搜 x±2/±1/0、y±1/±0.5/0，按 cell 周期环绕；两端同步。
-- 条码层（「抗微信压缩」档）默认开启：顶部/底部各 1pt 亮度条，76 bit = marker`1011`+uid32+分钟偏移24+CRC16-CCITT-FALSE；块亮度 205/245，块宽按屏宽自适应（≥78 块）。解码用未裁边原图；双条载荷一致才采信，单边只收 fixedBits=0 且复核误差≤4 的精确解；弱块纠错只翻 CRC 段（60..<76）不碰载荷区；复核误差>13 拒答。**宁缺毋假：不允许为出 uid 降低门槛**。Swift `StripWatermark` 与 `tools/bwdecode.py` 同步。`expect` 子命令回显写入原始值（build 原样，不转时区）。详见 `docs/strip-watermark.md`。
+- 条码层（「抗微信压缩」档）默认开启：顶部/底部各 1pt 亮度条，**顶底同载荷**，按屏宽选档（identity 76 / buildDay 91 / full 123 bit，解码端 CRC 试解区分，tier0 与 3.1.0 逐位兼容）；块亮度 205/245，块宽 = floor(widthPx/档位 bit) 且 ≥ 9px（实测 8px 在 q60+0.685 失败）。阈值必须用 Otsu：实测顶部条最前 4 像素被系统内容盖住，min/max 中点与 k-means 都会把暗块整批判亮。条码渲染用 `UIColor(patternImage:)`，**不能用 `CALayer.contents`**（实测不合成）。解码用未裁边原图；双条载荷一致才采信，单边只收 fixedBits=0 且复核误差≤4 的精确解；弱块纠错只翻 CRC 段（60..<76）不碰载荷区；复核误差>13 拒答。**宁缺毋假：不允许为出 uid 降低门槛**。Swift `StripWatermark` 与 `tools/bwdecode.py` 同步。`expect` 子命令回显写入原始值（build 原样，不转时区）。详见 `docs/strip-watermark.md`。
 - 修改公共API与非平凡逻辑带可运行验证；编解码修改同步`V6Codec.swift`、`V6BCH.swift`与`tools/bwdecode.py`。swift test及python3 tools/test_bwdecode.py全绿，并同图对账。
 - 验证包括原始设备像素截图、裁切/缩放/压缩/黑白边框的组合链路、小图拒答和无水印负样本。模拟器/Pillow结果不等于真机或实际IM转发验收。
 - 改布局破坏历史截图兼容，必须明说影响并同步README中英、解析和接入两个skill。

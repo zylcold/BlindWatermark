@@ -8,10 +8,11 @@ import UIKit
 /// 「抗微信压缩」档在窗口顶部/底部再各画一条 1pt 的可见亮度条码，见 StripWatermark。
 final class WatermarkWindow: UIWindow {
     private let host = UIViewController()
-    private let stripLayerTop = CALayer()
-    private let stripLayerBottom = CALayer()
-    /// 条码开关由 WatermarkState.Config.strip 控制；关闭时不挂 layer。
+    private let stripTop = UIView()
+    private let stripBottom = UIView()
     private var stripEnabled = false
+    /// 条码位图（1pt 高、整屏宽，按屏幕 scale 生成）。旋转/换宽后由 refreshStrips 重新生成。
+    private var stripImage: UIImage?
 
     init(scene: UIWindowScene, pattern: UIImage, level: UIWindow.Level) {
         super.init(windowScene: scene)
@@ -23,6 +24,13 @@ final class WatermarkWindow: UIWindow {
         host.view.isUserInteractionEnabled = false
         host.view.backgroundColor = .clear
         rootViewController = host
+
+        for strip in [stripTop, stripBottom] {
+            strip.isUserInteractionEnabled = false
+            strip.isHidden = true
+        }
+        host.view.addSubview(stripTop)
+        host.view.addSubview(stripBottom)
 
         update(pattern: pattern)
         isHidden = false
@@ -37,37 +45,39 @@ final class WatermarkWindow: UIWindow {
     }
 
     /// 顶部/底部 1pt 条码。`image` 为该屏幕像素宽、1pt 高（scale 行）的亮度条位图。
+    /// 用 `UIColor(patternImage:)` 而不是 CALayer.contents：后者在本工程实测不合成（backgroundColor 可见但 contents 不画）。
     func updateStrips(top: UIImage?, bottom: UIImage?) {
-        applyStrip(layer: stripLayerTop, image: top, yAxis: 0)
-        if let bottom = bottom {
-            let h = CGFloat(bottom.size.height * bottom.scale) / max(1, bottom.scale) // 1pt
-            applyStrip(layer: stripLayerBottom, image: bottom, yAxis: bounds.height - h)
+        stripImage = top
+        if stripEnabled, let stripImage {
+            for strip in [stripTop, stripBottom] {
+                strip.backgroundColor = UIColor(patternImage: stripImage)
+                strip.isHidden = false
+            }
         } else {
-            stripLayerBottom.removeFromSuperlayer()
+            for strip in [stripTop, stripBottom] {
+                strip.backgroundColor = nil
+                strip.isHidden = true
+            }
         }
+        layoutStrips()
     }
 
-    private func applyStrip(layer: CALayer, image: UIImage?, yAxis: CGFloat) {
-        guard let image = image, stripEnabled else {
-            layer.removeFromSuperlayer()
-            return
-        }
-        layer.frame = CGRect(x: 0, y: yAxis, width: bounds.width, height: image.size.height)
-        layer.contents = image.cgImage
-        layer.contentsGravity = .resizeAspectFill
-        layer.magnificationFilter = .nearest
-        layer.minificationFilter = .nearest
-        if layer.superlayer == nil {
-            host.view.layer.addSublayer(layer)
-        }
-        layer.setNeedsDisplay()
+    private func layoutStrips() {
+        guard stripEnabled, stripImage != nil else { return }
+        let width = stripImage?.size.width ?? bounds.width
+        stripTop.frame = CGRect(x: 0, y: 0, width: width, height: 1)
+        stripBottom.frame = CGRect(x: 0, y: bounds.height - 1, width: width, height: 1)
     }
 
     func setStripEnabled(_ enabled: Bool) {
         stripEnabled = enabled
         if !enabled {
-            stripLayerTop.removeFromSuperlayer()
-            stripLayerBottom.removeFromSuperlayer()
+            for strip in [stripTop, stripBottom] {
+                strip.backgroundColor = nil
+                strip.isHidden = true
+            }
+        } else if stripImage != nil {
+            updateStrips(top: stripImage, bottom: stripImage)
         }
     }
 
@@ -75,10 +85,7 @@ final class WatermarkWindow: UIWindow {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // 旋转/分屏后重新贴边
-        stripLayerTop.frame = CGRect(x: 0, y: 0, width: bounds.width, height: stripLayerTop.frame.height)
-        stripLayerBottom.frame = CGRect(x: 0, y: bounds.height - stripLayerBottom.frame.height,
-                                        width: bounds.width, height: stripLayerBottom.frame.height)
+        layoutStrips()
     }
 }
 

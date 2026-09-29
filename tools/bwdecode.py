@@ -843,21 +843,53 @@ def _search(sat,bounds,scales,companion):
 # 块亮度 bit1→205 / bit0→245。判决与纠错策略两端必须一致，改动需同步 Swift。
 # ----------------------------------------------------------------------------
 STRIP_MARKER=(True,False,True,True)
-STRIP_PAYLOAD_BITS=76
+# 三档载荷：identity 76 / buildDay 91 / full 123。档位不写进位流，用 CRC 试解读取，
+# 多个档位同时有效则拒答（与 Swift StripWatermark.Tier 镜像，改动需两端同步）。
+STRIP_TIERS=('identity','buildDay','full')
+STRIP_TIER_BITS={'identity':76,'buildDay':91,'full':123}
+# 字段区间（起点,位宽）：uid/min 三档相同，buildDay 仅 tier!=identity，page 仅 full
+STRIP_UID_RANGE=(4,32)
+STRIP_MINUTE_RANGE=(36,24)
+STRIP_BUILD_DAY_RANGE=(60,15)
+STRIP_PAGE_RANGE=(75,32)
+STRIP_PAGE_LENGTH=6
+STRIP_BUILD_DAY_MAX=(1<<15)-1
 STRIP_DARK=205
 STRIP_LIGHT=245
 STRIP_MIN_BLOCKS=78
+STRIP_MIN_BLOCK_PX=9.0
+STRIP_MAX_BLOCK_PX=32.0
 STRIP_SCAN_STEP=0.02
 STRIP_PHASES=(0.0,0.25,0.5,0.75)
 STRIP_WEAK_FIX_MAX_FLIPS=3
-# 弱块纠错只翻 CRC 段：载荷区（uid/分钟）不参与，避免纠错改写出假载荷
-STRIP_WEAK_FIX_SEGMENT=(60,76)
 STRIP_WEAK_FIX_POOL=12
 STRIP_MIN_CONTRAST=8.0
 # 复核误差上限：真值含噪声 ≈8-10，纠错凑 CRC 的假载荷 >15
 STRIP_MAX_VERIFY_ERROR=13.0
 # 单边（另一条缺失/被裁）只接受无纠错且误差 ≤ 此值的精确解
 STRIP_STRICT_VERIFY_ERROR=4.0
+# 两档同时有效且复核误差差在此范围内视为歧义
+STRIP_TIER_AMBIGUITY_MARGIN=2.0
+
+
+def strip_tier_crc_range(tier: str) -> tuple[int,int]:
+    bits=STRIP_TIER_BITS[tier]
+    return (bits-16,bits)
+
+
+def strip_tier_payload_bits(tier: str) -> int:
+    return STRIP_TIER_BITS[tier]
+
+
+def strip_pick_tier(width_px: int):
+    """按像素宽选最高可用档，返回 (tier, block_px) 或 None。"""
+    for tier in reversed(STRIP_TIERS):
+        bits=STRIP_TIER_BITS[tier]
+        if width_px<bits:continue
+        px=width_px/bits
+        if px<STRIP_MIN_BLOCK_PX:continue
+        return tier,min(STRIP_MAX_BLOCK_PX,math.floor(px*100)/100)
+    return None
 
 
 def strip_crc16(body: list[bool]) -> list[bool]:
@@ -869,9 +901,16 @@ def strip_crc16(body: list[bool]) -> list[bool]:
     return [bool((reg>>(15-i))&1) for i in range(16)]
 
 
-def strip_bits(uid: int, minute_offset: int) -> list[bool]:
+def strip_bits(uid: int, minute_offset: int, tier: str = 'identity',
+               build_day: int = 0, page_code: str | None = None) -> list[bool]:
     body=[bool((uid>>i)&1) for i in range(31,-1,-1)]+ \
          [bool((minute_offset>>i)&1) for i in range(23,-1,-1)]
+    if tier!='identity':
+        day=min(build_day,STRIP_BUILD_DAY_MAX)
+        body+=[bool((day>>i)&1) for i in range(14,-1,-1)]
+    if tier=='full':
+        value=encode_base37((page_code or '')[:STRIP_PAGE_LENGTH],STRIP_PAGE_LENGTH) or 0
+        body+=[bool((value>>i)&1) for i in range(31,-1,-1)]
     return list(STRIP_MARKER)+body+strip_crc16(body)
 
 
@@ -879,11 +918,12 @@ def strip_luma(rgba: np.ndarray) -> np.ndarray:
     return 0.299*rgba[:,:,0].astype(np.float64)+0.587*rgba[:,:,1]+0.114*rgba[:,:,2]
 
 
-def _strip_weak_fix(bits: list[bool], conf: list[float]):
+def _strip_weak_fix(bits: list[bool], conf: list[float], tier: str):
+    lo,hi=strip_tier_crc_range(tier)
     def crc_ok(b):
-        return strip_crc16(b[4:60])==b[60:76]
+        return strip_crc16(b[4:lo])==b[lo:hi]
     if crc_ok(bits):return bits,0
-    seg=list(range(*STRIP_WEAK_FIX_SEGMENT))
+    seg=list(range(lo,hi))
     order=sorted(seg,key=lambda i:conf[i])[:STRIP_WEAK_FIX_POOL]
     from itertools import combinations
     for r in range(1,STRIP_WEAK_FIX_MAX_FLIPS+1):
@@ -894,45 +934,75 @@ def _strip_weak_fix(bits: list[bool], conf: list[float]):
     return None,None
 
 
+def _strip_read(bits: list[bool], start: int, width: int) -> int:
+    value=0
+    for i in range(width):
+        if bits[start+i]:value|=1<<(width-1-i)
+    return value
+
+
+def _strip_cluster_threshold(values: np.ndarray) -> float:
+    """Otsu 阈值（最大化类间方差）。比 (min+max)/2 与 k-means 抗少量离群块：
+    实测顶部条码最前 4 像素被系统绘制内容盖住（0/154，块均值 ≈144），
+    与真实暗块（205）一起构成第三个簇；min/max 中点与 k-means 会把阈值拉到 180 左右，
+    导致 205 的暗块被整批判亮。Otsu 在 {144} 与 {205,245} 之间分割。"""
+    v=np.sort(values)
+    if len(v)<2:return float(v[0]) if len(v) else 0.0
+    total=float(v.sum())
+    sum_low=0.0
+    best=float(v[0]+v[-1])/2
+    best_var=-1.0
+    for i in range(1,len(v)):
+        sum_low+=float(v[i-1])
+        w_low=i/len(v); w_high=1-w_low
+        m_low=sum_low/i; m_high=(total-sum_low)/(len(v)-i)
+        between=w_low*w_high*(m_low-m_high)**2
+        if between>best_var:
+            best_var=between; best=(m_low+m_high)/2
+    return best
+
+
 def strip_decode_edge(rgba: np.ndarray, edge: str):
     height,width=rgba.shape[:2]
     y0=0 if edge=='top' else max(0,height-3)
     if width<STRIP_MIN_BLOCKS or y0>=height:return None
     strip=strip_luma(rgba[y0:min(y0+3,height)]).mean(axis=0)
-    best=None  # (err, bits, flips)
+    best=None  # (err, tier, bits, flips)
     bw=6.0
-    while bw<=32.0+1e-9:
+    while bw<=STRIP_MAX_BLOCK_PX+1e-9:
         for ph in STRIP_PHASES:
             n=int(width/bw)
             if n<STRIP_MIN_BLOCKS:continue
             edges=np.minimum((np.arange(n+1)*bw+ph).astype(int),width)
             if edges[-1]>width or edges[0]>=edges[-1]:continue
-            sums=np.add.reduceat(strip,edges[:-1])
+            sums=np.add.reduceat(strip[:edges[-1]],edges[:-1])
             m=sums/np.maximum(1,np.diff(edges))
-            head=m[:STRIP_PAYLOAD_BITS]
-            lo,hi=float(head.min()),float(head.max())
-            if hi-lo<STRIP_MIN_CONTRAST:continue
-            th=(lo+hi)/2
-            bits=[bool(v<th) for v in head]
-            if tuple(bits[:4])!=STRIP_MARKER:continue
-            conf=[abs(v-th) for v in head]
-            fixed,flips=_strip_weak_fix(bits,conf)
-            if fixed is None:continue
-            levels=[STRIP_DARK if b else STRIP_LIGHT for b in fixed]
-            err=float(np.abs(np.array(levels)-head).mean())
-            if err>STRIP_MAX_VERIFY_ERROR:continue
-            if best is None or err<best[0]:best=(err,fixed,flips)
+            for tier in STRIP_TIERS:
+                bits_n=STRIP_TIER_BITS[tier]
+                if n<bits_n:continue
+                head=m[:bits_n]
+                lo,hi=float(head.min()),float(head.max())
+                if hi-lo<STRIP_MIN_CONTRAST:continue
+                th=_strip_cluster_threshold(head)
+                bits=[bool(v<th) for v in head]
+                if tuple(bits[:4])!=STRIP_MARKER:continue
+                conf=[abs(v-th) for v in head]
+                fixed,flips=_strip_weak_fix(bits,conf,tier)
+                if fixed is None:continue
+                levels=[STRIP_DARK if b else STRIP_LIGHT for b in fixed]
+                err=float(np.abs(np.array(levels)-head).mean())
+                if err>STRIP_MAX_VERIFY_ERROR:continue
+                if best is None or err<best[0]:best=(err,tier,fixed,flips)
         bw+=STRIP_SCAN_STEP
     if best is None:return None
-    err,bits,flips=best
-    uid=0
-    for i in range(32):
-        if bits[4+i]:uid|=1<<(31-i)
-    minute=0
-    for i in range(24):
-        if bits[36+i]:minute|=1<<(23-i)
+    err,tier,bits,flips=best
+    uid=_strip_read(bits,*STRIP_UID_RANGE)
     if uid==0 or uid==0xFFFFFFFF:return None
-    return {'uid':uid,'minute_offset':minute,'fixed_bits':flips,'edge':edge,'verify_error':err}
+    minute=_strip_read(bits,*STRIP_MINUTE_RANGE)
+    build_day=_strip_read(bits,*STRIP_BUILD_DAY_RANGE) if tier!='identity' else None
+    page_code=decode_base37(_strip_read(bits,*STRIP_PAGE_RANGE),STRIP_PAGE_LENGTH) if tier=='full' else None
+    return {'uid':uid,'minute_offset':minute,'build_day':build_day,'page_code':page_code,
+            'fixed_bits':flips,'edge':edge,'tier':tier,'verify_error':err}
 
 
 def strip_decode(rgba: np.ndarray):
@@ -948,9 +1018,10 @@ def strip_decode(rgba: np.ndarray):
 
 
 def strip_render(rgba: np.ndarray, uid: int, minute_offset: int, block_px: float,
+                 tier: str = 'identity', build_day: int = 0, page_code: str | None = None,
                  strip_rows: int = 3) -> np.ndarray:
     """测试与对账用：把 top/bottom 两条画进 RGBA（uint8）数组。"""
-    bits=strip_bits(uid,minute_offset)
+    bits=strip_bits(uid,minute_offset,tier,build_day,page_code)
     out=rgba.copy()
     height,width=out.shape[:2]
     for edge,y0 in (('top',0),('bottom',max(0,height-strip_rows))):
@@ -972,6 +1043,7 @@ def run_expect(argv: list[str]) -> int:
     group.add_argument('--timestamp',type=int)
     group.add_argument('--minute-offset',type=int)
     parser.add_argument('--build')
+    parser.add_argument('--build-day',dest='build_day',help='自 2026-01-01 起的天数（条码 buildDay，原样回显）')
     parser.add_argument('--page')
     parser.add_argument('--app',type=int)
     parser.add_argument('--note')
@@ -987,11 +1059,14 @@ def run_expect(argv: list[str]) -> int:
         if len(args.build)!=12 or not args.build.isdigit():
             parser.error('--build 需要 12 位数字 YYYYMMDDHHMM')
         out['build']=args.build
+    if args.build_day is not None:
+        out['stripBuildDay']=int(args.build_day)
     if args.page:
         code=page_name_code(args.page)
         if not code or len(code)>V6_PAGE_LENGTH:
             parser.error('page 归一化后为空或超长')
         out['page']=code
+        out['stripPageCode']=code[:STRIP_PAGE_LENGTH]
     if args.app is not None:out['app']=args.app
     if args.note:out['note']=args.note
     print(json.dumps(out,sort_keys=True,ensure_ascii=False))
@@ -1064,9 +1139,21 @@ def main(argv=None):
         if strip_res is not None:
             minute=V6_TIMESTAMP_EPOCH+strip_res['minute_offset']*60
             clock=lambda t:datetime.datetime.fromtimestamp(t,datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-            print(f'strip=OK edge={strip_res["edge"]} uid={strip_res["uid"]} time={clock(minute)} fixedBits={strip_res["fixed_bits"]} crcStatus=OK(完整性自检,未验签)')
-            json_out['strip']={'uid':strip_res['uid'],'time':clock(minute),
-                               'fixedBits':strip_res['fixed_bits'],'edge':strip_res['edge']}
+            line=f'strip=OK tier={strip_res["tier"]} edge={strip_res["edge"]} uid={strip_res["uid"]} time={clock(minute)}'
+            strip_json={'uid':strip_res['uid'],'time':clock(minute),
+                        'fixedBits':strip_res['fixed_bits'],'edge':strip_res['edge'],'tier':strip_res['tier']}
+            if strip_res['build_day'] is not None:
+                # 天粒度：条码只存天数，时刻恒为当日 00:00 UTC
+                day_text=clock(V6_TIMESTAMP_EPOCH+strip_res['build_day']*86400)
+                line+=f' buildDay={strip_res["build_day"]} buildTime={day_text}'
+                strip_json['buildDay']=strip_res['build_day']
+                strip_json['buildTime']=day_text
+            if strip_res['page_code'] is not None:
+                line+=f' page={strip_res["page_code"] or "（空）"}'
+                strip_json['page']=strip_res['page_code']
+            line+=' fixedBits=%d crcStatus=OK(完整性自检,未验签)'%strip_res['fixed_bits']
+            print(line)
+            json_out['strip']=strip_json
         else:
             print('strip=NO')
             json_out['strip']='NO'

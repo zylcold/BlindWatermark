@@ -45,6 +45,14 @@ python3 /path/to/BlindWatermark/tools/bwdecode.py shot.jpg --layout
 
 ## 条码层（抗微信压缩档）
 
-3.1.0 起默认与 v6 同时渲染：顶部/底部各一条 1pt 可见亮度条，76 bit = marker`1011`+uid32+分钟偏移24+CRC16-CCITT-FALSE。条码用未裁边原图解码（黑边裁剪可能把条裁掉）。输出 `strip=OK edge=… uid=… time=… fixedBits=…`。
+3.2.0 起默认与 v6 同时渲染：顶部/底部各一条 1pt 可见亮度条，按屏宽自动选档，解码端用 CRC 试解区分：
 
-仲裁语义（两端一致，见 [条码协议](../../docs/strip-watermark.md)）：双条载荷一致才采信；仅单边只接受 fixedBits=0 且复核误差 ≤4 的精确解；弱块纠错只翻 CRC 段，不碰载荷区。`strip=NO` 不是错误，是拒答——不能为了出 uid 降低门槛；深色页面条码可见性属预期，不是解析问题。写入端对账：`bwdecode expect --uid … --timestamp … --build YYYYMMDDHHMM …` 回显原始 JSON（build 原样、不转时区），与 `--json` 解码结果比对。
+| 档 | bit | 字段 |
+|---|---:|---|
+| `identity` | 76 | marker`1011` + uid32 + 分钟偏移24 + CRC16 |
+| `buildDay` | 91 | + buildDay15（2026-01-01 起的**天**） |
+| `full` | 123 | + page32（6 字符 base37） |
+
+用未裁边原图解码（黑边裁剪可能把条裁掉）。输出 `strip=OK tier=… edge=… uid=… time=… [buildDay=… buildTime=…] [page=…] fixedBits=…`；buildTime 只到**天**（条码只存天数，时刻恒为当日 00:00 UTC），page 只有 6 字符、可能碰撞。阈值用 Otsu（抗顶部被系统内容污染的前几个像素）；多档同时有效且载荷不同时拒答。
+
+仲裁语义（两端一致，见 [条码协议](../../docs/strip-watermark.md)）：双条载荷一致才采信；仅单边只接受 fixedBits=0 且复核误差 ≤4 的精确解；弱块纠错只翻 CRC 段，不碰载荷区；阈值用 Otsu，不能退回 min/max 中点（会把暗块整批判亮）。`strip=NO` 不是错误，是拒答——不能为了出 uid 降低门槛；深色页面条码可见性属预期，不是解析问题。写入端对账：`bwdecode expect --uid … --timestamp … --build YYYYMMDDHHMM …` 回显原始 JSON（build 原样、不转时区），与 `--json` 解码结果比对。

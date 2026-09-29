@@ -210,13 +210,29 @@ if wantStrip || wantJson {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd HH:mm 'UTC'"
         let minute = WatermarkPayload.timestampEpoch + UInt64(s.minuteOffset) * 60
-        print("strip=OK edge=\(s.edge.rawValue) uid=\(s.uid) time=\(formatter.string(from: Date(timeIntervalSince1970: Double(minute)))) fixedBits=\(s.fixedBits) crcStatus=OK(完整性自检,未验签)")
-        json["strip"] = [
+        var line = "strip=OK tier=\(s.tier) edge=\(s.edge.rawValue) uid=\(s.uid) time=\(formatter.string(from: Date(timeIntervalSince1970: Double(minute))))"
+        var stripJSON: [String: Any] = [
             "uid": s.uid,
             "time": formatter.string(from: Date(timeIntervalSince1970: Double(minute))),
             "fixedBits": s.fixedBits,
             "edge": s.edge.rawValue,
-        ] as [String: Any]
+            "tier": "\(s.tier)",
+        ]
+        if let day = s.buildDay {
+            // 天粒度：条码只存天数，时刻恒为当日 00:00 UTC
+            let buildTime = WatermarkPayload.timestampEpoch + UInt64(day) * 86_400
+            let dayText = formatter.string(from: Date(timeIntervalSince1970: Double(buildTime)))
+            line += " buildDay=\(day) buildTime=\(dayText)"
+            stripJSON["buildDay"] = day
+            stripJSON["buildTime"] = dayText
+        }
+        if let page = s.pageCode {
+            line += " page=\(page.isEmpty ? "（空）" : page)"
+            stripJSON["page"] = page
+        }
+        line += " fixedBits=\(s.fixedBits) crcStatus=OK(完整性自检,未验签)"
+        print(line)
+        json["strip"] = stripJSON
     } else if wantStrip {
         print("strip=NO")
         json["strip"] = "NO"

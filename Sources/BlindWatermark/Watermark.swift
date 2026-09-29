@@ -135,26 +135,23 @@ final class WatermarkState {
         }
     }
 
-    /// 生成并挂载顶部/底部条码位图。块宽按 pt 自适应，保证 ≥ minBlocks 块。
+    /// 生成并挂载顶部/底部条码位图。按屏宽选最高可用档（tier0/1/2），块宽由档位反推且 ≥ 10px。
     private func refreshStrips(for window: WatermarkWindow, scene: UIWindowScene) {
         guard effectiveConfig().strip != .off else {
             window.updateStrips(top: nil, bottom: nil)
             return
         }
         let scale = max(1, scene.traitCollection.displayScale)
-        let widthPx = Int(scene.coordinateSpace.bounds.width * scale)
-        guard widthPx >= StripWatermark.minBlocks * 6 else { return }
-        // 块宽 pt：至少 minBlocks 块，不小于 4pt（太窄抗不住 JPEG）
-        let widthPt = Int(scene.coordinateSpace.bounds.width)
-        let blockPt = max(4, widthPt / StripWatermark.minBlocks)
-        let blockPx = Double(blockPt) * Double(scale)
+        let widthPx = Int((scene.coordinateSpace.bounds.width * scale).rounded())
+        guard let (tier, blockPx) = StripWatermark.Tier.best(forWidthPx: widthPx) else { return }
         let stripPx = max(1, Int(scale))
-        let bits = StripWatermark.bits(payload: effectiveConfig().payload)
+        let bits = StripWatermark.bits(payload: effectiveConfig().payload, tier: tier)
         var image = RGBAImage(width: widthPx, height: stripPx)
         StripWatermark.render(into: &image, bits: bits, blockWidthPx: blockPx,
                               stripHeightPx: stripPx, edge: .top)
         guard let cg = image.makeCGImage() else { return }
         let ui = UIImage(cgImage: cg, scale: CGFloat(scale), orientation: .up)
+        // 顶底同一份载荷：保留双条仲裁与单边裁切后的完整身份
         window.updateStrips(top: ui, bottom: ui)
     }
 

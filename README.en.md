@@ -1,10 +1,10 @@
 # BlindWatermark
 
-Code version: **3.0.0** · Protocol: **v6** · [中文](README.md)
+Code version: **3.2.0** · Protocol: **v6 + strip layer** · [中文](README.md)
 
 A low-amplitude chroma watermark for iOS screens. Recover uid, timestamp, build time, page code, app, and note from screenshots entirely offline, without a server lookup. The Swift runtime uses system frameworks only and supports iOS 13 / macOS 11; the Demo requires iOS 15.
 
-Only v6 is supported. Historical screenshots require the corresponding historical tools. Defaults are `delta=4` and `plane=chroma`. CRC24 checks integrity, not signatures or identity. Review watermark visibility on target devices.
+Only v6 is supported. Historical screenshots require the corresponding historical tools. Defaults are `delta=4` and `plane=chroma`. As of 3.2.0 an anti-IM-compression strip layer is on by default: a visible 1pt luminance bar at the top and bottom edges whose payload tier (uid+minute / +buildDay / +page) is chosen from the screen width; it survives rescaling and heavy JPEG but dies on cropping, complementing v6 — see [strip watermark](docs/strip-watermark.md). CRC24/CRC16 check integrity, not signatures or identity. Review watermark visibility on target devices.
 
 ## Installation
 

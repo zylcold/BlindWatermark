@@ -78,4 +78,60 @@ final class StripWatermarkTests: XCTestCase {
         for i in 0..<24 where bits[36 + i] { mins |= 1 << UInt32(23 - i) }
         XCTAssertEqual(mins, 1)
     }
+
+
+    // MARK: - 三档载荷（3.2.0）
+
+    func testTierBitCounts_andFields() {
+        let day: UInt32 = 1339      // 2026-09-28 起的粗算天数，仅验证编解码往返
+        let page = "userprof"
+        XCTAssertEqual(StripWatermark.bits(uid: 7, minuteOffset: 1).count, 76)
+        XCTAssertEqual(StripWatermark.bits(uid: 7, minuteOffset: 1, tier: .buildDay, buildDay: day).count, 91)
+        XCTAssertEqual(StripWatermark.bits(uid: 7, minuteOffset: 1, tier: .full, buildDay: day, pageCode: page).count, 123)
+    }
+
+    func testTierRoundtripTopAndBottom() {
+        var image = RGBAImage(width: 1320, height: 2868)
+        let day: UInt32 = 275
+        let bits = StripWatermark.bits(uid: 124_914_474, minuteOffset: 389_398,
+                                       tier: .full, buildDay: day, pageCode: "userprof")
+        StripWatermark.render(into: &image, bits: bits, blockWidthPx: 1320.0 / 123.0,
+                              stripHeightPx: 3, edge: .top)
+        StripWatermark.render(into: &image, bits: bits, blockWidthPx: 1320.0 / 123.0,
+                              stripHeightPx: 3, edge: .bottom)
+        let decoded = StripWatermark.decode(image: image)
+        XCTAssertEqual(decoded?.uid, 124_914_474)
+        XCTAssertEqual(decoded?.minuteOffset, 389_398)
+        XCTAssertEqual(decoded?.buildDay, day)
+        // 条码 page 只存 6 字符（base37 32 bit 上限），"userprof" → "userpr"
+        XCTAssertEqual(decoded?.pageCode, "userpr")
+        XCTAssertEqual(decoded?.tier, .full)
+        // 10.73px 块在网格边界上会有个别块贴边，允许 ≤1 位 CRC 段纠错
+        XCTAssertLessThanOrEqual(decoded?.fixedBits ?? 99, 1)
+    }
+
+    func testTierAutomaticSelectionByWidth() {
+        // 3x 大屏 → full；SE 3x → buildDay；2x 414pt → buildDay；2x 375pt → identity
+        XCTAssertEqual(StripWatermark.Tier.best(forWidthPx: 1320)?.0, .full)
+        // 1125px 在 9px 块下限下已可容 full（1125/123 = 9.14）
+        XCTAssertEqual(StripWatermark.Tier.best(forWidthPx: 1125)?.0, .full)
+        XCTAssertEqual(StripWatermark.Tier.best(forWidthPx: 828)?.0, .buildDay)
+        XCTAssertEqual(StripWatermark.Tier.best(forWidthPx: 750)?.0, .identity)
+        // 太窄：放不下最小档
+        XCTAssertNil(StripWatermark.Tier.best(forWidthPx: 600))
+        // 所有可用档的块宽都不低于下限
+        for width in [750, 828, 1125, 1320, 2048] {
+            if let (tier, px) = StripWatermark.Tier.best(forWidthPx: width) {
+                XCTAssertGreaterThanOrEqual(px, StripWatermark.minBlockPx, "width=\(width) tier=\(tier)")
+            }
+        }
+    }
+
+    func testIdentityTierCompatWith310Layout() {
+        // tier0 必须与 3.1.0 的 76 bit 布局逐位一致（老截图可解）
+        let bits = StripWatermark.bits(uid: 124_914_474, minuteOffset: 389_398, tier: .identity)
+        XCTAssertEqual(bits.count, 76)
+        XCTAssertEqual(Array(bits.prefix(4)), [true, false, true, true])
+        XCTAssertEqual(StripWatermark.crc16(Array(bits[4..<60])), Array(bits[60..<76]))
+    }
 }
