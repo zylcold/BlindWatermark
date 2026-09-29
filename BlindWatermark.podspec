@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermark'
-  s.version          = '3.0.0'
+  s.version          = '3.1.0'
   s.summary          = '常驻屏上低幅度盲水印，截图可解码溯源（设备 / 时间 / 页面）'
   s.description      = <<-DESC
     v6 离线截图水印：211 bit 字段通过 BCH(511,211,t40) 和整体偶校验编码，
@@ -22,8 +22,8 @@ Pod::Spec.new do |s|
   # 本地联调：pod 'BlindWatermark', :path => '.'
   s.source_files = 'Sources/BlindWatermark/**/*.swift'
 
-  s.dependency 'BlindWatermarkCore',     '~> 3.0.0'
-  s.dependency 'BlindWatermarkAutoLoad', '~> 3.0.0'
+  s.dependency 'BlindWatermarkCore',     '~> 3.1.0'
+  s.dependency 'BlindWatermarkAutoLoad', '~> 3.1.0'
 
   s.frameworks = 'UIKit', 'CoreGraphics'
 

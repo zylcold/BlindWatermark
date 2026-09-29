@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 import datetime
+import json
 import math
 import sys
 from dataclasses import dataclass
@@ -836,7 +837,171 @@ def _search(sat,bounds,scales,companion):
     return finish(scan(sorted(fine)))
 
 
+# ----------------------------------------------------------------------------
+# 顶部/底部 1pt 可见条码（「抗微信压缩」档），与 Swift StripWatermark 镜像。
+# 布局：marker 1011(4) + uid32 + 分钟偏移24 + CRC16-CCITT-FALSE(16) = 76 bit；
+# 块亮度 bit1→205 / bit0→245。判决与纠错策略两端必须一致，改动需同步 Swift。
+# ----------------------------------------------------------------------------
+STRIP_MARKER=(True,False,True,True)
+STRIP_PAYLOAD_BITS=76
+STRIP_DARK=205
+STRIP_LIGHT=245
+STRIP_MIN_BLOCKS=78
+STRIP_SCAN_STEP=0.02
+STRIP_PHASES=(0.0,0.25,0.5,0.75)
+STRIP_WEAK_FIX_MAX_FLIPS=3
+# 弱块纠错只翻 CRC 段：载荷区（uid/分钟）不参与，避免纠错改写出假载荷
+STRIP_WEAK_FIX_SEGMENT=(60,76)
+STRIP_WEAK_FIX_POOL=12
+STRIP_MIN_CONTRAST=8.0
+# 复核误差上限：真值含噪声 ≈8-10，纠错凑 CRC 的假载荷 >15
+STRIP_MAX_VERIFY_ERROR=13.0
+# 单边（另一条缺失/被裁）只接受无纠错且误差 ≤ 此值的精确解
+STRIP_STRICT_VERIFY_ERROR=4.0
+
+
+def strip_crc16(body: list[bool]) -> list[bool]:
+    reg=0xFFFF
+    for bit in body:
+        msb=(reg>>15)&1
+        reg=(reg<<1)&0xFFFF
+        if msb^(1 if bit else 0):reg^=0x1021
+    return [bool((reg>>(15-i))&1) for i in range(16)]
+
+
+def strip_bits(uid: int, minute_offset: int) -> list[bool]:
+    body=[bool((uid>>i)&1) for i in range(31,-1,-1)]+ \
+         [bool((minute_offset>>i)&1) for i in range(23,-1,-1)]
+    return list(STRIP_MARKER)+body+strip_crc16(body)
+
+
+def strip_luma(rgba: np.ndarray) -> np.ndarray:
+    return 0.299*rgba[:,:,0].astype(np.float64)+0.587*rgba[:,:,1]+0.114*rgba[:,:,2]
+
+
+def _strip_weak_fix(bits: list[bool], conf: list[float]):
+    def crc_ok(b):
+        return strip_crc16(b[4:60])==b[60:76]
+    if crc_ok(bits):return bits,0
+    seg=list(range(*STRIP_WEAK_FIX_SEGMENT))
+    order=sorted(seg,key=lambda i:conf[i])[:STRIP_WEAK_FIX_POOL]
+    from itertools import combinations
+    for r in range(1,STRIP_WEAK_FIX_MAX_FLIPS+1):
+        for combo in combinations(order,r):
+            b=bits[:]
+            for i in combo:b[i]=not b[i]
+            if crc_ok(b):return b,r
+    return None,None
+
+
+def strip_decode_edge(rgba: np.ndarray, edge: str):
+    height,width=rgba.shape[:2]
+    y0=0 if edge=='top' else max(0,height-3)
+    if width<STRIP_MIN_BLOCKS or y0>=height:return None
+    strip=strip_luma(rgba[y0:min(y0+3,height)]).mean(axis=0)
+    best=None  # (err, bits, flips)
+    bw=6.0
+    while bw<=32.0+1e-9:
+        for ph in STRIP_PHASES:
+            n=int(width/bw)
+            if n<STRIP_MIN_BLOCKS:continue
+            edges=np.minimum((np.arange(n+1)*bw+ph).astype(int),width)
+            if edges[-1]>width or edges[0]>=edges[-1]:continue
+            sums=np.add.reduceat(strip,edges[:-1])
+            m=sums/np.maximum(1,np.diff(edges))
+            head=m[:STRIP_PAYLOAD_BITS]
+            lo,hi=float(head.min()),float(head.max())
+            if hi-lo<STRIP_MIN_CONTRAST:continue
+            th=(lo+hi)/2
+            bits=[bool(v<th) for v in head]
+            if tuple(bits[:4])!=STRIP_MARKER:continue
+            conf=[abs(v-th) for v in head]
+            fixed,flips=_strip_weak_fix(bits,conf)
+            if fixed is None:continue
+            levels=[STRIP_DARK if b else STRIP_LIGHT for b in fixed]
+            err=float(np.abs(np.array(levels)-head).mean())
+            if err>STRIP_MAX_VERIFY_ERROR:continue
+            if best is None or err<best[0]:best=(err,fixed,flips)
+        bw+=STRIP_SCAN_STEP
+    if best is None:return None
+    err,bits,flips=best
+    uid=0
+    for i in range(32):
+        if bits[4+i]:uid|=1<<(31-i)
+    minute=0
+    for i in range(24):
+        if bits[36+i]:minute|=1<<(23-i)
+    if uid==0 or uid==0xFFFFFFFF:return None
+    return {'uid':uid,'minute_offset':minute,'fixed_bits':flips,'edge':edge,'verify_error':err}
+
+
+def strip_decode(rgba: np.ndarray):
+    top=strip_decode_edge(rgba,'top')
+    bottom=strip_decode_edge(rgba,'bottom')
+    # 双条一致才采信；单边只接受无纠错且误差小的精确解（宁缺毋假）
+    if top and bottom:
+        return top if (top['uid']==bottom['uid'] and top['minute_offset']==bottom['minute_offset']) else None
+    single=top or bottom
+    if single and single['fixed_bits']==0 and single['verify_error']<=STRIP_STRICT_VERIFY_ERROR:
+        return single
+    return None
+
+
+def strip_render(rgba: np.ndarray, uid: int, minute_offset: int, block_px: float,
+                 strip_rows: int = 3) -> np.ndarray:
+    """测试与对账用：把 top/bottom 两条画进 RGBA（uint8）数组。"""
+    bits=strip_bits(uid,minute_offset)
+    out=rgba.copy()
+    height,width=out.shape[:2]
+    for edge,y0 in (('top',0),('bottom',max(0,height-strip_rows))):
+        for y in range(y0,min(y0+strip_rows,height)):
+            x=0
+            for b,bit in enumerate(bits):
+                level=STRIP_DARK if bit else STRIP_LIGHT
+                end=min(width,int((b+1)*block_px))
+                out[y,x:end]=level
+                x=end
+            out[y,x:width]=STRIP_LIGHT
+    return out
+
+
+def run_expect(argv: list[str]) -> int:
+    parser=argparse.ArgumentParser(prog='bwdecode expect',description='写入端期望值 → JSON（原始数据回显）')
+    parser.add_argument('--uid',type=int,required=True)
+    group=parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--timestamp',type=int)
+    group.add_argument('--minute-offset',type=int)
+    parser.add_argument('--build')
+    parser.add_argument('--page')
+    parser.add_argument('--app',type=int)
+    parser.add_argument('--note')
+    args=parser.parse_args(argv)
+    out={'uid':args.uid}
+    if args.timestamp is not None:
+        out['timestamp']=args.timestamp
+        out['stripMinuteOffset']=max(0,(args.timestamp-V6_TIMESTAMP_EPOCH)//60)
+    else:
+        out['stripMinuteOffset']=args.minute_offset
+        out['timestamp']=V6_TIMESTAMP_EPOCH+args.minute_offset*60
+    if args.build:
+        if len(args.build)!=12 or not args.build.isdigit():
+            parser.error('--build 需要 12 位数字 YYYYMMDDHHMM')
+        out['build']=args.build
+    if args.page:
+        code=page_name_code(args.page)
+        if not code or len(code)>V6_PAGE_LENGTH:
+            parser.error('page 归一化后为空或超长')
+        out['page']=code
+    if args.app is not None:out['app']=args.app
+    if args.note:out['note']=args.note
+    print(json.dumps(out,sort_keys=True,ensure_ascii=False))
+    return 0
+
+
 def main(argv=None):
+    effective=sys.argv[1:] if argv is None else argv
+    if effective[:1]==['expect']:
+        return run_expect(effective[1:])
     parser=argparse.ArgumentParser(description='v6-only 水印解码器；历史截图需要旧版本工具')
     parser.add_argument('path')
     parser.add_argument('--layout',action='store_true')
@@ -845,39 +1010,74 @@ def main(argv=None):
     parser.add_argument('--auto',action='store_true')
     parser.add_argument('--scale',type=float)
     parser.add_argument('--offset')
+    parser.add_argument('--strip',action='store_true',help='输出顶部/底部条码解码结果')
+    parser.add_argument('--strip-only',dest='strip_only',action='store_true',help='只解条码，跳过 v6 几何搜索')
+    parser.add_argument('--json',dest='as_json',action='store_true',help='机读 JSON 输出（v6 + strip）')
     args=parser.parse_args(argv)
     if args.scale is not None and (not math.isfinite(args.scale) or not 0.5<=args.scale<=1.5):parser.error('--scale 需要 0.5...1.5')
-    try:image=load_image(args.path)
+    try:
+        raw=load_image(args.path)
     except Exception as error:
         print(f'无法读取图片: {error}',file=sys.stderr)
         return 1
-    trim=(0,0,0,0)
-    if args.offset is not None:
-        try:
-            x,y=map(float,args.offset.split(','))
-            if not all(math.isfinite(v) and v>=0 for v in (x,y)):raise ValueError
-        except ValueError:parser.error('--offset 需要非负 X,Y')
-        result=decode(image,args.plane,args.scale or 1,x,y,True)
+    # 条码用未裁边原图：条在画面最顶/最底，黑边裁剪可能把条一起裁掉
+    strip_res=strip_decode(raw) if (args.strip or args.strip_only or args.as_json) else None
+    json_out={}
+    if args.strip_only:
+        result=None
+        trim=(0,0,0,0)
+        image=raw
     else:
-        image,trim=trim_uniform_dark_border(image)
-        result=decode_best(image,[args.scale] if args.scale is not None else None,args.plane)
-    if result is None:
-        print('NO(protocol=v6，无 BCH + CRC-valid 载荷)',file=sys.stderr)
+        image=raw
+        trim=(0,0,0,0)
+        if args.offset is not None:
+            try:
+                x,y=map(float,args.offset.split(','))
+                if not all(math.isfinite(v) and v>=0 for v in (x,y)):raise ValueError
+            except ValueError:parser.error('--offset 需要非负 X,Y')
+            result=decode(image,args.plane,args.scale or 1,x,y,True)
+        else:
+            image,trim=trim_uniform_dark_border(image)
+            result=decode_best(image,[args.scale] if args.scale is not None else None,args.plane)
+    if result is not None:
+        c=result.best
+        p=result.payload
+        verdict='OK' if result.has_sufficient_evidence else f'TOO_SMALL(每 bit 最少 {c.min_obs} 次，需要 ≥ 5)'
+        trim_field=f' trim=({",".join(map(str,trim))})' if any(trim) else ''
+        print(f'protocol=v6 payload=0x{p.bytes.hex()} plane={args.plane} phase=({c.context.x:.2f},{c.context.y:.2f}) tileShift=({c.shift_x},{c.shift_y}) scale={c.context.scale:.6f} correctedBits={c.corrected_bits} softRecovery={str(c.soft).lower()} companionRecovery={str(c.context.companion).lower()} pilotScore={c.pilot:.3f} minObs={c.min_obs} avgObs={c.avg_obs:.1f} |z|中位={c.median_z:.1f} {verdict}{trim_field}')
+        if not result.has_sufficient_evidence:
+            print('观测不足，不解读字段，请使用范围更大的原图。',file=sys.stderr)
+            json_out['v6']='TOO_SMALL'
+            if strip_res is None:
+                return 1 if args.layout else 0
+        else:
+            clock=lambda t:datetime.datetime.fromtimestamp(t,datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            json_out['v6']={'uid':p.uid,'time':clock(p.timestamp),'buildTime':clock(p.build_time),
+                            'page':p.page_code,'app':p.app,'note':p.note,
+                            'correctedBits':c.corrected_bits,'companionRecovery':bool(c.context.companion),
+                            'minObs':c.min_obs}
+            if args.layout:
+                print(f'uid={p.uid} time={clock(p.timestamp)} page={p.page_code} buildTime={clock(p.build_time)} app={p.app} note={p.note or "（空）"} crcStatus=OK(完整性自检,未验签)')
+    else:
+        json_out['v6']='NO'
+    if args.strip or args.strip_only or args.as_json:
+        if strip_res is not None:
+            minute=V6_TIMESTAMP_EPOCH+strip_res['minute_offset']*60
+            clock=lambda t:datetime.datetime.fromtimestamp(t,datetime.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+            print(f'strip=OK edge={strip_res["edge"]} uid={strip_res["uid"]} time={clock(minute)} fixedBits={strip_res["fixed_bits"]} crcStatus=OK(完整性自检,未验签)')
+            json_out['strip']={'uid':strip_res['uid'],'time':clock(minute),
+                               'fixedBits':strip_res['fixed_bits'],'edge':strip_res['edge']}
+        else:
+            print('strip=NO')
+            json_out['strip']='NO'
+    if args.as_json:
+        print(json.dumps(json_out,sort_keys=True,ensure_ascii=False))
+    if result is None and strip_res is None:
+        print('NO(protocol=v6 与 strip 均无有效载荷)',file=sys.stderr)
         return 1
-    if result.ambiguous:
+    if result is not None and result.ambiguous and strip_res is None:
         print('ambiguous(protocol=v6，多个不同载荷，拒绝解读)',file=sys.stderr)
         return 1
-    c=result.best
-    p=result.payload
-    verdict='OK' if result.has_sufficient_evidence else f'TOO_SMALL(每 bit 最少 {c.min_obs} 次，需要 ≥ 5)'
-    trim_field=f' trim=({",".join(map(str,trim))})' if any(trim) else ''
-    print(f'protocol=v6 payload=0x{p.bytes.hex()} plane={args.plane} phase=({c.context.x:.2f},{c.context.y:.2f}) tileShift=({c.shift_x},{c.shift_y}) scale={c.context.scale:.6f} correctedBits={c.corrected_bits} softRecovery={str(c.soft).lower()} companionRecovery={str(c.context.companion).lower()} pilotScore={c.pilot:.3f} minObs={c.min_obs} avgObs={c.avg_obs:.1f} |z|中位={c.median_z:.1f} {verdict}{trim_field}')
-    if not result.has_sufficient_evidence:
-        print('观测不足，不解读字段，请使用范围更大的原图。',file=sys.stderr)
-        return 1 if args.layout else 0
-    if args.layout:
-        clock=lambda t:datetime.datetime.fromtimestamp(t,datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-        print(f'uid={p.uid} time={clock(p.timestamp)} page={p.page_code} buildTime={clock(p.build_time)} app={p.app} note={p.note or "（空）"} crcStatus=OK(完整性自检,未验签)')
     return 0
 
 if __name__=='__main__':sys.exit(main())

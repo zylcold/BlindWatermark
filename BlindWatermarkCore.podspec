@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BlindWatermarkCore'
-  s.version          = '3.0.0'
+  s.version          = '3.1.0'
   s.summary          = '盲水印编解码核心（跨平台，无 UI 依赖）'
   s.description      = <<-DESC
     v6 离线截图水印：211 bit 字段通过 BCH(511,211,t40) 和整体偶校验编码，

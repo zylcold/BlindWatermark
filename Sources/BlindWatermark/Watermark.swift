@@ -6,16 +6,28 @@ import BlindWatermarkAutoLoad
 public typealias WatermarkPayload = BlindWatermarkCore.WatermarkPayload
 public typealias WatermarkPlane = BlindWatermarkCore.WatermarkPlane
 
+/// 「抗微信压缩」档：顶部/底部 1pt 可见亮度条码。
+/// v6 色度盲水印在缩放+强压缩链路会丢，条码专补这条链路；裁切即失效，两层互补。
+public enum WatermarkStripMode: Equatable {
+    /// 关闭条码，只保留 v6 色度盲水印。
+    case off
+    /// 顶部+底部各一条 1pt 条码（默认）。
+    case topAndBottom
+}
+
 /// 所有入口仅渲染 v6；完整字段由类型校验，不能传任意 bit 布局。
 public enum Watermark {
     public static let defaultWindowLevel: UIWindow.Level = .alert + 1
 
+    /// - Parameter strip: 抗微信压缩条码，默认 `.topAndBottom`（开启）。传 `.off` 关闭。
     public static func install(payload: WatermarkPayload, delta: UInt8 = V6Codec.defaultDelta,
                                plane: WatermarkPlane = .chroma,
-                               windowLevel: UIWindow.Level = defaultWindowLevel) {
+                               windowLevel: UIWindow.Level = defaultWindowLevel,
+                               strip: WatermarkStripMode = .topAndBottom) {
         precondition(Thread.isMainThread, "Watermark UI must be configured on the main thread")
         precondition(delta >= 2)
-        WatermarkState.shared.config = .init(payload: payload, delta: delta, plane: plane, windowLevel: windowLevel)
+        WatermarkState.shared.config = .init(payload: payload, delta: delta, plane: plane,
+                                              windowLevel: windowLevel, strip: strip)
         WatermarkState.shared.start()
     }
 
@@ -44,6 +56,8 @@ final class WatermarkState {
         var delta: UInt8 = V6Codec.defaultDelta
         var plane: WatermarkPlane = .chroma
         var windowLevel: UIWindow.Level = Watermark.defaultWindowLevel
+        /// 抗微信压缩条码，默认开启。
+        var strip: WatermarkStripMode = .topAndBottom
     }
     var config: Config?
     var payloadProvider: (() -> WatermarkPayload)?
@@ -103,17 +117,45 @@ final class WatermarkState {
         let key = ObjectIdentifier(scene)
         guard windows[key] == nil else { return }
         guard let pattern = makePattern(scale: scene.traitCollection.displayScale) else { return }
-        windows[key] = WatermarkWindow(scene: scene, pattern: pattern, level: effectiveConfig().windowLevel)
+        let window = WatermarkWindow(scene: scene, pattern: pattern, level: effectiveConfig().windowLevel)
+        windows[key] = window
+        window.setStripEnabled(effectiveConfig().strip != .off)
+        refreshStrips(for: window, scene: scene)
     }
 
     func refreshPatterns() {
         for window in windows.values {
             guard let scene = window.windowScene else { continue }
             window.windowLevel = effectiveConfig().windowLevel
+            window.setStripEnabled(effectiveConfig().strip != .off)
             if let pattern = makePattern(scale: scene.traitCollection.displayScale) {
                 window.update(pattern: pattern)
             }
+            refreshStrips(for: window, scene: scene)
         }
+    }
+
+    /// 生成并挂载顶部/底部条码位图。块宽按 pt 自适应，保证 ≥ minBlocks 块。
+    private func refreshStrips(for window: WatermarkWindow, scene: UIWindowScene) {
+        guard effectiveConfig().strip != .off else {
+            window.updateStrips(top: nil, bottom: nil)
+            return
+        }
+        let scale = max(1, scene.traitCollection.displayScale)
+        let widthPx = Int(scene.coordinateSpace.bounds.width * scale)
+        guard widthPx >= StripWatermark.minBlocks * 6 else { return }
+        // 块宽 pt：至少 minBlocks 块，不小于 4pt（太窄抗不住 JPEG）
+        let widthPt = Int(scene.coordinateSpace.bounds.width)
+        let blockPt = max(4, widthPt / StripWatermark.minBlocks)
+        let blockPx = Double(blockPt) * Double(scale)
+        let stripPx = max(1, Int(scale))
+        let bits = StripWatermark.bits(payload: effectiveConfig().payload)
+        var image = RGBAImage(width: widthPx, height: stripPx)
+        StripWatermark.render(into: &image, bits: bits, blockWidthPx: blockPx,
+                              stripHeightPx: stripPx, edge: .top)
+        guard let cg = image.makeCGImage() else { return }
+        let ui = UIImage(cgImage: cg, scale: CGFloat(scale), orientation: .up)
+        window.updateStrips(top: ui, bottom: ui)
     }
 
     func effectiveConfig() -> Config {

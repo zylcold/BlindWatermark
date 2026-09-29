@@ -249,3 +249,79 @@ class V6Checks(unittest.TestCase):
                 self.assertEqual(subprocess.run([os.sys.executable,str(ROOT/'tools/bwdecode.py'),str(path)]+args,capture_output=True).returncode,2)
 
 if __name__=='__main__':unittest.main()
+
+
+class StripWatermarkChecks(unittest.TestCase):
+    UID=124914474
+    MINUTE=389398
+
+    def test_crc16_golden(self):
+        body=[]
+        for byte in b'123456789':
+            body+=[bool((byte>>(7-i))&1) for i in range(8)]
+        crc=b.strip_crc16(body)
+        value=0
+        for bit in crc:value=(value<<1)|(1 if bit else 0)
+        self.assertEqual(value,0x29B1)
+
+    def test_bits_layout(self):
+        bits=b.strip_bits(self.UID,self.MINUTE)
+        self.assertEqual(len(bits),76)
+        self.assertEqual(bits[:4],list(b.STRIP_MARKER))
+        self.assertEqual(b.strip_crc16(bits[4:60]),bits[60:76])
+
+    def test_render_decode_roundtrip_and_jpeg_chain(self):
+        base=screenshot()
+        marked=b.strip_render(base,self.UID,self.MINUTE,base.shape[1]/88)
+        out=b.strip_decode(marked)
+        self.assertIsNotNone(out)
+        self.assertEqual((out['uid'],out['minute_offset']),(self.UID,self.MINUTE))
+        rgb=Image.fromarray(marked).convert('RGB')
+        for name,quality,scale in [('q76',76,1.0),('q60',60,1.0),('q76-0969',76,0.969),('q60-0685',60,0.685)]:
+            with self.subTest(chain=name):
+                im=rgb.resize((round(rgb.width*scale),round(rgb.height*scale)),Image.LANCZOS) if scale!=1.0 else rgb
+                with tempfile.TemporaryDirectory() as folder:
+                    path=Path(folder)/f'{name}.jpg'
+                    im.save(path,quality=quality)
+                    result=b.strip_decode(b.load_image(str(path)))
+                    self.assertIsNotNone(result,f'{name} 应可解')
+                    self.assertEqual(result['uid'],self.UID)
+                    self.assertEqual(result['minute_offset'],self.MINUTE)
+
+    def test_no_strip_negative(self):
+        base=screenshot()
+        self.assertIsNone(b.strip_decode(base))
+
+    def test_swift_python_cli_strip_contract(self):
+        swift=Path(os.environ.get('BW_SWIFT_CLI',str(ROOT/'.build/release/bwdecode')))
+        self.assertTrue(swift.exists(),'先 swift build -c release')
+        with tempfile.TemporaryDirectory() as folder:
+            marked=b.strip_render(screenshot(),self.UID,self.MINUTE,screenshot().shape[1]/88)
+            path=Path(folder)/'strip.jpg'
+            Image.fromarray(marked).convert('RGB').save(path,quality=76)
+            sw=subprocess.run([str(swift),str(path),'--strip-only'],text=True,capture_output=True,timeout=60)
+            py=subprocess.run([os.sys.executable,str(ROOT/'tools/bwdecode.py'),str(path),'--strip-only'],text=True,capture_output=True,timeout=60)
+            self.assertEqual(sw.returncode,0,sw.stderr)
+            self.assertEqual(py.returncode,0,py.stderr)
+            self.assertIn(f'uid={self.UID}',sw.stdout)
+            self.assertIn(f'uid={self.UID}',py.stdout)
+            # 两端 strip 行语义一致（除 edge 可能不同外）
+            for line in sw.stdout.splitlines():
+                if line.startswith('strip='):
+                    self.assertTrue(line.startswith('strip=OK'),line)
+            self.assertIn('crcStatus=OK',sw.stdout)
+
+    def test_expect_subcommand_raw_echo(self):
+        out=subprocess.run([os.sys.executable,str(ROOT/'tools/bwdecode.py'),'expect',
+                            '--uid',str(self.UID),'--timestamp','1790589485',
+                            '--build','202609291449','--page','BHUserProfileViewController','--app','11'],
+                           text=True,capture_output=True,timeout=60)
+        self.assertEqual(out.returncode,0,out.stderr)
+        data=json.loads(out.stdout)
+        # JSON 回原始数据：build 原样，不转时区
+        self.assertEqual(data['build'],'202609291449')
+        self.assertEqual(data['uid'],self.UID)
+        self.assertEqual(data['timestamp'],1790589485)
+        self.assertEqual(data['stripMinuteOffset'],389398)
+        self.assertEqual(data['page'],'userprof')
+        self.assertEqual(data['app'],11)
